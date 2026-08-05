@@ -103,6 +103,14 @@ sh scripts/verify.sh
 The verifier checks the manifests and agent contract, validates shell and Python
 syntax, runs an MCP smoke test, and exercises the worker flow with a fake Pi.
 
+## Related project
+
+**Sol Luna Advisor** is the sibling workflow for teams that prefer a Codex-native
+Luna implementation lane: primary Sol plans and accepts, Luna implements, and a
+fresh read-only Sol reviewer gives the final verdict. Together, the two projects
+offer the same supervised Sol-led delivery pattern with a choice of Pi or Luna for
+implementation.
+
 ## Repository layout
 
 ```text
@@ -125,4 +133,3 @@ plugins/sol-pi-advisor/
 - Pi `0.83.0` is required exactly
 - The plugin produces a working-tree diff; it does not commit, push, merge, or
   create pull requests
-
