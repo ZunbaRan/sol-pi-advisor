@@ -1,0 +1,20 @@
+{
+  "name": "sol-pi-advisor",
+  "interface": {
+    "displayName": "Sol Pi Advisor"
+  },
+  "plugins": [
+    {
+      "name": "sol-pi-advisor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sol-pi-advisor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

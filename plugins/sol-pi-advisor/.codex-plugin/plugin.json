@@ -1,0 +1,33 @@
+{
+  "name": "sol-pi-advisor",
+  "version": "0.1.0+codex.20260804130543",
+  "description": "Sol plans and accepts, a local Pi implementation lane develops, and a fresh Sol reviewer gives the final verdict.",
+  "author": {
+    "name": "loloru"
+  },
+  "keywords": [
+    "codex",
+    "orchestration",
+    "sol",
+    "pi",
+    "review"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Sol Pi Advisor",
+    "shortDescription": "Sol directs Pi implementation and fresh Sol review.",
+    "longDescription": "A supervised local delivery workflow: the primary Sol task owns architecture and acceptance, a persistent Pi coding-agent session implements in an isolated Git worktree, and a fresh read-only Sol agent reviews the accepted diff.",
+    "developerName": "loloru",
+    "category": "Productivity",
+    "capabilities": [
+      "Orchestration",
+      "Write",
+      "Review"
+    ],
+    "defaultPrompt": [
+      "Use Sol Pi Advisor to implement this task through local Pi and fresh Sol review.",
+      "Plan in Sol, delegate implementation to Pi, verify the diff, then obtain fresh Sol review."
+    ]
+  }
+}

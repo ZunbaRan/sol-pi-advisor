@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "sol-pi-advisor": {
+      "command": "./bin/sol-pi-advisor-mcp",
+      "args": [],
+      "cwd": ".",
+      "env_vars": [
+        "HOME",
+        "CODEX_HOME",
+        "SOL_PI_NODE",
+        "SOL_PI_CLI"
+      ]
+    }
+  }
+}

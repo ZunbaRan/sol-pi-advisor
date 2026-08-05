@@ -1,0 +1,7 @@
+interface:
+  display_name: "Sol Pi Advisor"
+  short_description: "Sol plans, Pi implements, and fresh Sol reviews"
+  default_prompt: "Use $orchestration to deliver this change through a local Pi implementation lane and fresh Sol review."
+
+policy:
+  allow_implicit_invocation: false
