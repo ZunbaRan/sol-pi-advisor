@@ -15,6 +15,7 @@ from typing import Any, Iterator
 SUPPORTED_PI_VERSION = "0.83.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RUN_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+LANE_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 class LaneError(RuntimeError):
@@ -185,6 +186,28 @@ def normalize_allowed_paths(values: Any) -> list[str]:
     return sorted(set(normalized))
 
 
+def normalize_lane_id(value: Any) -> str:
+    if not isinstance(value, str) or not LANE_ID_RE.fullmatch(value):
+        raise LaneError(
+            "InvalidLaneId",
+            "laneId must start with a lowercase letter and contain only lowercase letters, digits, or hyphens (maximum 64 characters)",
+        )
+    return value
+
+
+def ownership_paths_overlap(left: list[str], right: list[str]) -> list[tuple[str, str]]:
+    overlaps: list[tuple[str, str]] = []
+    for left_path in left:
+        for right_path in right:
+            if (
+                left_path == right_path
+                or left_path.startswith(right_path + "/")
+                or right_path.startswith(left_path + "/")
+            ):
+                overlaps.append((left_path, right_path))
+    return overlaps
+
+
 def resolve_repository(repo_root: Any, base_ref: Any) -> tuple[Path, str]:
     if not isinstance(repo_root, str) or not repo_root:
         raise LaneError("InvalidRepository", "repoRoot is required")
@@ -311,6 +334,15 @@ def collect_git_evidence(run_path: Path, revision: int) -> dict[str, Any]:
 def process_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    # The MCP server intentionally detaches supervisor Popen objects after
+    # recording their PID. Reap a settled direct child here so a zombie is not
+    # mistaken for a live lane during abort/busy checks.
+    try:
+        reaped, _ = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except (ChildProcessError, PermissionError):
+        pass
     try:
         os.kill(pid, 0)
         return True
@@ -336,3 +368,20 @@ def active_run_for_repository(repo_root: Path) -> str | None:
         if status.get("state") in {"preparing", "running", "aborting"} and process_alive(status.get("pid")):
             return candidate.name
     return None
+
+
+def run_paths_for_batch(batch_id: str) -> list[Path]:
+    if not RUN_ID_RE.fullmatch(batch_id):
+        raise LaneError("InvalidBatchId", "batchId must be a canonical lowercase UUID")
+    result: list[Path] = []
+    runs = ensure_state_root() / "runs"
+    for candidate in runs.iterdir():
+        if not candidate.is_dir() or not RUN_ID_RE.fullmatch(candidate.name):
+            continue
+        manifest_path = candidate / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        manifest = read_json(manifest_path)
+        if manifest.get("batchId") == batch_id:
+            result.append(candidate)
+    return sorted(result, key=lambda path: read_json(path / "manifest.json").get("laneId", ""))

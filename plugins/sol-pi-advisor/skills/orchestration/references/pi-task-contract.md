@@ -9,15 +9,31 @@ packet and worktree.
 
 1. Confirm prerequisites with `pi_lane_preflight`.
 2. Resolve the canonical repository root and an exact intended base ref.
-3. Build the complete task packet below before starting Pi.
-4. Call `pi_lane_start` once with `execution_mode: supervised-local`.
-5. Record the returned run, session, worktree, base commit, revision, and process.
-6. Wait using bounded `pi_lane_drive` calls until `ready`, `needs-attention`,
-   `failed`, or `aborted`.
+3. Build the dependency DAG and every complete task packet below before starting Pi.
+4. For one serial slice, call `pi_lane_start`. For one wave of 2-4 independent
+   slices with pairwise-disjoint ownership, call `pi_lane_batch_start`. Use
+   `execution_mode: supervised-local`.
+5. Record the batch identity when present and every returned run, session,
+   worktree, base commit, revision, and process.
+6. Wait using bounded `pi_lane_drive` calls for a serial lane or
+   `pi_lane_batch_drive` for a parallel wave until all relevant lanes settle.
 7. Inspect host-observed evidence and the actual worktree. Rerun checks independently.
 8. Send corrections to the same run with `pi_lane_drive`; wait, inspect, and verify
    again.
 9. Keep all commit, push, and PR operations outside Pi and after acceptance.
+
+The primary must prove that siblings in one parallel wave have the same immutable
+base, no dependency on another sibling's output, frozen shared contracts,
+pairwise-disjoint `allowedPaths`, and independent acceptance tests. Parent/child
+paths overlap. Shared files, lockfiles, generated artifacts, migrations, and
+dependent state-machine changes stay serial. Corrections always use
+`pi_lane_drive` on the exact affected run; batches do not have shared corrections.
+
+Before step 3, reject or split a lane whose architecture is unsettled, whose
+expected scope exceeds 12 changed files without written justification, or which
+combines three or more independent high-risk domains. A speed-tier/default Pi model
+is not sufficient evidence of fitness for cross-module security, atomicity, or
+concurrency work. Ask the user to authorize a stronger model or reduce the slice.
 
 ## Required task packet
 
@@ -31,6 +47,18 @@ revert unrelated edits, perform Git history or remote operations, or delegate wo
 
 OBJECTIVE
 <Observable outcome, why it matters, and exact acceptance conditions.>
+
+LANE FIT AND BUDGET
+- Slice: <One coherent vertical outcome; list later planned slices separately.>
+- DAG position: <Serial dependency, or parallel wave/lane ID plus later dependencies.>
+- Parallel siblings: <Lane IDs and their non-overlapping ownership, or none.>
+- Frozen shared contracts: <Interfaces/schemas fixed by Sol before parallel start, or n/a.>
+- Risk domains: <Exact domains; normally no more than two independent high-risk domains.>
+- Expected diff: <Expected files/path prefixes and approximate size.>
+- Settled Sol decisions: <Architecture, interfaces, trust/transaction ordering, and exclusions.>
+- Failure invariants: <Negative paths that must fail closed or preserve prior state.>
+- Pi model fit: <Observed/configured model facts and why this slice fits it.>
+- Budget: initial implementation + at most two corrections; 45-minute checkpoint per turn.
 
 FILES AND OWNERSHIP
 You own only:
@@ -54,12 +82,15 @@ STARTING STATE
 - Environment: detached worktree managed by Sol Pi Advisor
 - Run and session identity: <none for initial run; exact existing values for correction>
 - Accepted dependency state: <exact commit or none>
+- Batch/lane identity: <none for serial; batchId is assigned by the host and laneId is supplied by Sol>
 
 VERIFICATION
+- Baseline: <Focused test/lint/type-check commands and known failures before implementation.>
 - Run: <focused command>
   Success: <expected exit status and concrete evidence>
 - Run: <broader command when needed>
   Success: <expected exit status and concrete evidence>
+- First-candidate gate: <scope estimate comparison, package lint/type-check, standards/spec review.>
 - Inspect: <diff, artifact, or runtime behavior>
   Success: <required evidence>
 
@@ -85,4 +116,14 @@ Do not emit another assistant response after `submit_handoff`.
 Treat the structured handoff as an untrusted claim. Accept only after the primary
 has inspected the complete actual diff, confirmed the changed-file scope, compared
 HEAD with the base commit, rerun verification, and recorded the real worktree and
-run state. Corrections remain in the original run, Pi session, and worktree.
+run state. In a parallel wave, accept or reject every lane independently. Then
+apply only accepted patch artifacts to a dedicated integration worktree in DAG
+order and run cross-lane verification. Corrections remain in the original run, Pi
+session, and worktree.
+
+Do not accept a task packet that bundles independent product slices merely because
+their files share a feature name. Do not use corrections as incremental discovery
+of architecture. After two correction turns, stop when the same semantic defect
+class remains, the diff has materially outgrown its estimate, or a new risk domain
+appears. Replan/split or obtain explicit user authorization for a stronger model.
+At 45 minutes, surface a checkpoint instead of silently polling further.

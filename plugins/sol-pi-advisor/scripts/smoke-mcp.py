@@ -44,7 +44,29 @@ process.stdin.flush()
 
 listed = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
 names = {tool["name"] for tool in listed["result"]["tools"]}
-assert names == {"pi_lane_preflight", "pi_lane_start", "pi_lane_drive"}, names
+assert names == {
+    "pi_lane_preflight",
+    "pi_lane_start",
+    "pi_lane_batch_start",
+    "pi_lane_drive",
+    "pi_lane_batch_drive",
+}, names
+
+preflight = exchange(
+    {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": "pi_lane_preflight", "arguments": {}},
+    }
+)
+parallel = preflight["result"]["structuredContent"]["parallelWave"]
+assert parallel == {
+    "minimumLanes": 2,
+    "maximumLanes": 4,
+    "requiresSameBaseCommit": True,
+    "requiresDisjointAllowedPaths": True,
+}
 
 process.stdin.close()
 process.wait(timeout=5)

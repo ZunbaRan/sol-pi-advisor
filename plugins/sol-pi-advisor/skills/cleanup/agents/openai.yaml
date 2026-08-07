@@ -1,0 +1,7 @@
+interface:
+  display_name: "Clean Sol Pi Runs"
+  short_description: "Safely clean completed Pi runs and worktrees"
+  default_prompt: "Use $cleanup to inspect and safely clean completed Sol Pi Advisor runs."
+
+policy:
+  allow_implicit_invocation: false

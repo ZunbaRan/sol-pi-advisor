@@ -12,6 +12,8 @@ plugin_dir=$(CDPATH= cd "$script_dir/.." && pwd) || exit 1
 manifest=$plugin_dir/.codex-plugin/plugin.json
 mcp_manifest=$plugin_dir/.mcp.json
 skill=$plugin_dir/skills/orchestration/SKILL.md
+cleanup_skill=$plugin_dir/skills/cleanup/SKILL.md
+cleanup_script=$plugin_dir/skills/cleanup/scripts/cleanup-runs.py
 reviewer=$plugin_dir/agents/sol-pi-advisor-sol-reviewer.toml
 installer=$plugin_dir/scripts/install-agent.sh
 
@@ -36,11 +38,19 @@ PY
 grep -q '^name: orchestration$' "$skill" || fail 'skill name is invalid.'
 grep -q 'pi_lane_preflight' "$skill" || fail 'Pi preflight tool is missing.'
 grep -q 'pi_lane_start' "$skill" || fail 'Pi start tool is missing.'
+grep -q 'pi_lane_batch_start' "$skill" || fail 'Pi parallel start tool is missing.'
 grep -q 'pi_lane_drive' "$skill" || fail 'Pi drive tool is missing.'
+grep -q 'pi_lane_batch_drive' "$skill" || fail 'Pi parallel drive tool is missing.'
 grep -q 'sol_pi_advisor_sol_reviewer' "$skill" || fail 'reviewer role is missing.'
 grep -q 'supervised-local' "$skill" || fail 'execution boundary is missing.'
 grep -q '`high`, `xhigh`, or' "$skill" || fail 'eligible primary reasoning levels are missing.'
 grep -q 'do not reject `xhigh` or `max`' "$skill" || fail 'higher primary reasoning levels are not explicitly accepted.'
+
+grep -q '^name: cleanup$' "$cleanup_skill" || fail 'cleanup skill name is invalid.'
+grep -q 'dry-run by default' "$cleanup_skill" || fail 'cleanup dry-run contract is missing.'
+grep -q 'git worktree remove --force' "$cleanup_skill" || fail 'cleanup worktree contract is missing.'
+grep -q 'explicit user approval' "$cleanup_skill" || fail 'cleanup approval boundary is missing.'
+grep -q 'batchId' "$cleanup_skill" || fail 'cleanup parallel-wave identity contract is missing.'
 
 grep -q '^name = "sol_pi_advisor_sol_reviewer"$' "$reviewer" || fail 'reviewer name is invalid.'
 grep -q '^model = "gpt-5.6-sol"$' "$reviewer" || fail 'reviewer model is invalid.'
@@ -63,7 +73,8 @@ sh -n "$plugin_dir/bin/sol-pi-advisor-mcp" || fail 'MCP launcher syntax is inval
 
 python3 - "$plugin_dir/mcp/common.py" "$plugin_dir/mcp/run_worker.py" \
   "$plugin_dir/mcp/server.py" "$plugin_dir/scripts/smoke-mcp.py" \
-  "$plugin_dir/scripts/test-fake-pi.py" <<'PY' || fail 'Python syntax validation failed.'
+  "$plugin_dir/scripts/test-fake-pi.py" "$plugin_dir/scripts/test-cleanup.py" \
+  "$cleanup_script" <<'PY' || fail 'Python syntax validation failed.'
 import pathlib
 import sys
 
@@ -101,6 +112,9 @@ CODEX_HOME=$test_root/codex python3 "$plugin_dir/scripts/smoke-mcp.py" >/dev/nul
 python3 "$plugin_dir/scripts/test-fake-pi.py" >/dev/null ||
   fail 'fake Pi end-to-end test failed.'
 
+python3 "$plugin_dir/scripts/test-cleanup.py" >/dev/null ||
+  fail 'cleanup test failed.'
+
 quick_validate=
 if [ -n "${CODEX_HOME-}" ]; then
   quick_validate=$CODEX_HOME/skills/.system/skill-creator/scripts/quick_validate.py
@@ -110,6 +124,8 @@ fi
 if [ -n "$quick_validate" ] && [ -f "$quick_validate" ]; then
   python3 "$quick_validate" "$plugin_dir/skills/orchestration" >/dev/null ||
     fail 'skill validation failed.'
+  python3 "$quick_validate" "$plugin_dir/skills/cleanup" >/dev/null ||
+    fail 'cleanup skill validation failed.'
 fi
 
 printf '%s\n' 'VERIFY PASSED'

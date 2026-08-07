@@ -9,7 +9,7 @@ for the final verdict.
 Primary Sol (plan + accept)
           |
           v
-Pi in a detached Git worktree (implement)
+One Pi lane, or 2-4 independent Pi lanes in detached worktrees
           |
           v
 Primary Sol (inspect diff + rerun checks)
@@ -18,8 +18,8 @@ Primary Sol (inspect diff + rerun checks)
 Fresh Sol / High (read-only review)
 ```
 
-The current `0.1.0` release intentionally supports one implementation lane per
-repository at a time.
+The current `0.1.0` release supports one serial lane or one safe parallel wave of
+2-4 independent lanes per repository at a time.
 
 ## Why this exists
 
@@ -27,7 +27,8 @@ Agentic coding works better when planning, implementation, acceptance, and final
 review have explicit owners. Sol Pi Advisor enforces that separation:
 
 - The primary Sol task owns requirements, architecture, scope, and acceptance.
-- Pi implements only inside an isolated detached Git worktree.
+- Pi implements only inside an isolated detached Git worktree. Parallel lanes all
+  share one immutable base and must own pairwise-disjoint paths.
 - The host records the actual base commit, changed paths, full diff, and SHA-256
   digest instead of trusting the worker's prose.
 - The primary task independently reruns verification and sends corrections back to
@@ -87,9 +88,30 @@ the plugin for the current implementation request, for example:
 Use Sol Pi Advisor to implement this task through local Pi and fresh Sol review.
 ```
 
-The primary task will preflight the environment, create a detached worktree, start
-one Pi implementation lane, verify the resulting diff, and obtain the final fresh
-Sol review.
+The primary task will preflight the environment, build a dependency DAG, run either
+one Pi lane or one safe parallel wave, verify every resulting diff independently,
+integrate accepted patches in a dedicated worktree, and obtain the final fresh Sol
+review.
+
+### Parallel waves
+
+`pi_lane_batch_start` accepts 2-4 lane packets. The batch has one generated
+`batchId`; each lane has its own stable `laneId`, run ID, Pi session, allowed paths,
+and detached worktree. The server resolves one base commit for the whole wave and
+rejects exact or parent/child ownership overlap before creating any worktree.
+
+Use `pi_lane_batch_drive` to wait until every lane settles or to abort all lanes
+that are still active. Send fixes with ordinary `pi_lane_drive` against the exact
+affected run. A batch becoming `ready` means all lane candidates are available for
+independent Sol inspection—it does not mean their combined behavior is accepted.
+
+Tasks that share files, generated outputs, lockfiles, migrations, or unaccepted
+interfaces belong in separate dependency waves and remain serial.
+
+After a task batch is accepted or explicitly abandoned, invoke
+`$sol-pi-advisor:cleanup`. The cleanup skill inventories durable runs, performs a
+dry-run, archives the final patch and minimal acceptance evidence, and only after
+explicit approval removes the detached worktree and raw Pi logs.
 
 ## Validate the package
 
@@ -123,12 +145,15 @@ plugins/sol-pi-advisor/
   mcp/                                 Local lane supervisor
   pi-extensions/                       Pi handoff and policy extension
   skills/orchestration/                Sol/Pi/Sol workflow contract
+  skills/cleanup/                      Safe post-task run and worktree cleanup
   scripts/                             Installer, preflight, and verification
 ```
 
 ## Current limitations
 
-- One active Pi run per repository
+- One active serial lane or one active parallel wave (maximum four lanes) per repository
+- Parallel lanes require the same base commit, no sibling dependency, frozen shared
+  contracts, and pairwise-disjoint path ownership
 - `supervised-local` execution only
 - Pi `0.83.0` is required exactly
 - The plugin produces a working-tree diff; it does not commit, push, merge, or
