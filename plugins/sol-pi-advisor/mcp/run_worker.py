@@ -11,7 +11,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import LaneError, collect_git_evidence, read_json, update_status
+from common import (
+    LaneError,
+    collect_git_evidence,
+    collect_git_policy_snapshot,
+    read_json,
+    update_status,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +48,45 @@ def extract_event(event: dict[str, Any], observed: dict[str, Any]) -> None:
             observed["handoff"] = result["details"]
 
 
+def live_policy_finding(run_path: Path, baseline: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        snapshot = collect_git_policy_snapshot(run_path)
+    except LaneError as exc:
+        return {
+            "code": "LiveGitEvidenceUnavailable",
+            "message": str(exc),
+            "policyBasis": "git-worktree-state",
+            "stdoutUsedForPolicy": False,
+        }
+
+    introduced: list[dict[str, str]] = []
+    if snapshot["head"] != snapshot["baseCommit"] and snapshot["head"] != baseline["head"]:
+        introduced.append(
+            {
+                "code": "HeadMoved",
+                "detail": f"HEAD changed during this turn: {baseline['head']} -> {snapshot['head']}",
+            }
+        )
+    new_staged = sorted(set(snapshot["stagedPaths"]) - set(baseline["stagedPaths"]))
+    if new_staged:
+        introduced.append({"code": "IndexModified", "detail": ", ".join(new_staged)})
+    new_outside = sorted(
+        set(snapshot["outsideAllowedPaths"]) - set(baseline["outsideAllowedPaths"])
+    )
+    if new_outside:
+        introduced.append({"code": "OwnershipViolation", "detail": ", ".join(new_outside)})
+    if not introduced:
+        return None
+    return {
+        "code": "LiveGitPolicyViolation",
+        "message": "Pi introduced a Git policy violation during this turn",
+        "policyBasis": snapshot["policyBasis"],
+        "stdoutUsedForPolicy": snapshot["stdoutUsedForPolicy"],
+        "findings": introduced,
+        "snapshot": snapshot,
+    }
+
+
 def main() -> int:
     args = parse_args()
     run_path = Path(args.run_dir).resolve()
@@ -49,6 +94,23 @@ def main() -> int:
     revision = args.revision
     message_file = Path(args.message_file).resolve()
     worktree = Path(manifest["worktree"])
+    scratch_dir = Path(manifest.get("scratchDir", run_path / "scratch"))
+    try:
+        scratch_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        policy_baseline = collect_git_policy_snapshot(run_path)
+    except (LaneError, OSError) as exc:
+        code = exc.code if isinstance(exc, LaneError) else type(exc).__name__
+        update_status(
+            run_path,
+            state="failed",
+            revision=revision,
+            pid=None,
+            piPid=None,
+            finishedAt=time.time(),
+            reason="worker preflight failure",
+            error={"code": code, "message": str(exc)},
+        )
+        return 1
 
     update_status(
         run_path,
@@ -91,7 +153,7 @@ def main() -> int:
     command.extend(
         [
             f"@{message_file}",
-            "Implement this Sol Pi Advisor task packet. Your final action must call submit_handoff exactly once.",
+            "Implement this Sol Pi Advisor task packet. Use $SOL_PI_SCRATCH_DIR for disposable experiments, never create scratch files in the repository, and do not install or resolve dependencies. Repository-wide host checks belong to primary Sol. Your final action must call submit_handoff exactly once.",
         ]
     )
 
@@ -103,12 +165,24 @@ def main() -> int:
             "SOL_PI_ALLOWED_PATHS_JSON": json.dumps(manifest["allowedPaths"]),
             "SOL_PI_BASE_COMMIT": manifest["baseCommit"],
             "SOL_PI_RUN_ID": manifest["runId"],
+            "SOL_PI_SCRATCH_DIR": str(scratch_dir),
+            "TMPDIR": str(scratch_dir),
+            "TMP": str(scratch_dir),
+            "TEMP": str(scratch_dir),
         }
     )
 
     event_path = run_path / f"events-revision-{revision}.jsonl"
     stderr_path = run_path / f"stderr-revision-{revision}.log"
-    observed: dict[str, Any] = {"agentEndSeen": False, "handoff": None}
+    observed: dict[str, Any] = {
+        "agentEndSeen": False,
+        "handoff": None,
+        "policyBaseline": {
+            "stateDigest": policy_baseline["stateDigest"],
+            "violations": policy_baseline["violations"],
+        },
+    }
+    policy_stop: dict[str, Any] | None = None
 
     try:
         with event_path.open("a", encoding="utf-8") as events, stderr_path.open(
@@ -138,6 +212,16 @@ def main() -> int:
                     continue
                 if isinstance(event, dict):
                     extract_event(event, observed)
+                    if (
+                        event.get("type") == "tool_execution_end"
+                        and event.get("toolName") in {"bash", "submit_handoff"}
+                        and policy_stop is None
+                    ):
+                        policy_stop = live_policy_finding(run_path, policy_baseline)
+                        if policy_stop is not None:
+                            observed["policyStop"] = policy_stop
+                            if process.poll() is None:
+                                process.terminate()
             exit_code = process.wait()
 
         evidence = collect_git_evidence(run_path, revision)
@@ -146,6 +230,9 @@ def main() -> int:
         if violations:
             state = "needs-attention"
             reason = "host-observed policy violation"
+        elif policy_stop is not None:
+            state = "needs-attention"
+            reason = "live Git policy monitor stopped the Pi turn for primary review"
         elif exit_code != 0:
             state = "failed"
             reason = f"Pi exited with status {exit_code}"

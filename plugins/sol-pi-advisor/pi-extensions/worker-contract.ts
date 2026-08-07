@@ -26,6 +26,35 @@ function isAllowed(candidate: string, allowed: string[]): boolean {
 	return allowed.some((prefix) => relative === prefix || relative.startsWith(`${prefix}/`));
 }
 
+function isScratch(candidate: string): boolean {
+	const configured = process.env.SOL_PI_SCRATCH_DIR;
+	if (!configured) return false;
+	const absolute = path.resolve(process.cwd(), candidate.replace(/^@/, ""));
+	const relative = path.relative(path.resolve(configured), absolute);
+	return Boolean(relative) && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function primaryOwnedCommandReason(command: string): string | undefined {
+	const dependencyResolver =
+		/\b(?:bunx|npx|npm\s+exec|pnpm\s+(?:dlx|exec)|yarn\s+(?:dlx|exec)|uvx|pipx\s+run)\b/i;
+	if (dependencyResolver.test(command)) {
+		return "Dependency-resolving commands are primary-owned. Do not work around this block; report the check as a handoff gap.";
+	}
+
+	const dependencyMutation =
+		/\b(?:(?:bun|npm|pnpm|yarn)\s+(?:add|ci|install|remove|uninstall|update|upgrade)|(?:pip|pip3)\s+install|uv\s+(?:add|lock|sync)|poetry\s+(?:add|install|lock)|cargo\s+(?:add|update)|go\s+(?:get|mod\s+tidy))\b/i;
+	if (dependencyMutation.test(command)) {
+		return "Dependency installation or dependency-state mutation is primary-owned. Report the missing environment instead of changing it.";
+	}
+
+	const repositoryWideDeadCode = /\b(?:bun\s+(?:run\s+)?dead-code|knip)\b/i;
+	if (repositoryWideDeadCode.test(command)) {
+		return "Repository-wide dead-code checks are primary-owned because they may resolve dependencies. Report this check for primary verification.";
+	}
+
+	return undefined;
+}
+
 const submitHandoff = defineTool({
 	name: "submit_handoff",
 	label: "Submit Sol Pi handoff",
@@ -67,10 +96,14 @@ export default function workerContract(pi: ExtensionAPI) {
 
 	pi.on("tool_call", (event) => {
 		const allowed = allowedPaths();
-		if ((event.toolName === "write" || event.toolName === "edit") && !isAllowed(String(event.input.path), allowed)) {
+		if (
+			(event.toolName === "write" || event.toolName === "edit") &&
+			!isAllowed(String(event.input.path), allowed) &&
+			!isScratch(String(event.input.path))
+		) {
 			return {
 				block: true,
-				reason: `Write is outside Sol-owned paths: ${String(event.input.path)}`,
+				reason: `Write is outside Sol-owned paths and the run scratch directory: ${String(event.input.path)}`,
 			};
 		}
 
@@ -82,6 +115,8 @@ export default function workerContract(pi: ExtensionAPI) {
 			if (forbidden.test(command) || prOperation.test(command)) {
 				return { block: true, reason: "Git history, remote, worktree, and PR operations are owned by primary Sol." };
 			}
+			const primaryOwnedReason = primaryOwnedCommandReason(command);
+			if (primaryOwnedReason) return { block: true, reason: primaryOwnedReason };
 		}
 
 		return undefined;

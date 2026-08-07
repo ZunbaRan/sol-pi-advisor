@@ -15,10 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (
     PLUGIN_ROOT,
-    SUPPORTED_PI_VERSION,
     LaneError,
     active_run_for_repository,
     atomic_write_json,
+    collect_git_evidence,
     ensure_state_root,
     locked,
     normalize_allowed_paths,
@@ -36,7 +36,7 @@ from common import (
 
 SERVER_INFO = {"name": "sol-pi-advisor", "version": "0.1.0"}
 TERMINAL_STATES = {"ready", "needs-attention", "failed", "aborted"}
-ACTIVE_STATES = {"preparing", "running", "aborting"}
+ACTIVE_STATES = {"preparing", "running", "pausing", "aborting"}
 MAX_PARALLEL_LANES = 4
 
 
@@ -68,7 +68,7 @@ PARALLEL_LANE_SCHEMA = {
 TOOLS = [
     {
         "name": "pi_lane_preflight",
-        "description": "Check the local Pi, Node, Git, state directory, supported version, and execution-boundary facts before starting a Sol Pi Advisor run.",
+        "description": "Check the local Pi identity, Node, Git, state directory, and execution-boundary facts before starting a Sol Pi Advisor run.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
@@ -125,13 +125,16 @@ TOOLS = [
     },
     {
         "name": "pi_lane_drive",
-        "description": "Wait for, correct, or abort an existing Pi run. Corrections reuse the same Pi session and worktree and are accepted only after the prior turn settles.",
+        "description": "Wait for, recoverably pause, correct, or permanently abort an existing Pi run. Pause settles as needs-attention so correction can reuse the same Pi session and worktree.",
         "inputSchema": {
             "type": "object",
             "required": ["runId", "directive"],
             "properties": {
                 "runId": {"type": "string"},
-                "directive": {"type": "string", "enum": ["wait", "correct", "abort"]},
+                "directive": {
+                    "type": "string",
+                    "enum": ["wait", "pause", "correct", "abort"],
+                },
                 "waitMs": {"type": "integer", "minimum": 0, "maximum": 30000},
                 "instruction": {"type": "string"},
                 "evidence": {"type": "array", "items": {"type": "string"}},
@@ -142,13 +145,13 @@ TOOLS = [
     },
     {
         "name": "pi_lane_batch_drive",
-        "description": "Wait for every lane in a parallel wave to settle, or abort every still-active lane. Corrections remain lane-specific through pi_lane_drive.",
+        "description": "Wait for every lane in a parallel wave, recoverably pause every active lane, or permanently abort every active lane. Corrections remain lane-specific through pi_lane_drive.",
         "inputSchema": {
             "type": "object",
             "required": ["batchId", "directive"],
             "properties": {
                 "batchId": {"type": "string"},
-                "directive": {"type": "string", "enum": ["wait", "abort"]},
+                "directive": {"type": "string", "enum": ["wait", "pause", "abort"]},
                 "waitMs": {"type": "integer", "minimum": 0, "maximum": 30000},
                 "reason": {"type": "string"},
             },
@@ -172,6 +175,7 @@ def public_snapshot(run_path: Path) -> dict[str, Any]:
         "reason": status.get("reason"),
         "repoRoot": manifest["repoRoot"],
         "worktree": manifest["worktree"],
+        "scratchDir": manifest.get("scratchDir", str(run_path / "scratch")),
         "baseCommit": manifest["baseCommit"],
         "allowedPaths": manifest["allowedPaths"],
         "pid": status.get("pid"),
@@ -238,14 +242,8 @@ def handle_preflight(_: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def require_compatible_pi() -> dict[str, Any]:
-    identity = preflight()
-    if not identity["versionCompatible"]:
-        raise LaneError(
-            "PiVersionMismatch",
-            f"Pi {identity['piVersion']} is installed; version {SUPPORTED_PI_VERSION} is required",
-        )
-    return identity
+def require_pi() -> dict[str, Any]:
+    return preflight()
 
 
 def rollback_prepared_run(repository: Path, path: Path, worktree: Path) -> None:
@@ -298,6 +296,8 @@ def prepare_run(
 
         session_dir = path / "sessions"
         session_dir.mkdir(mode=0o700)
+        scratch_dir = path / "scratch"
+        scratch_dir.mkdir(mode=0o700)
         packet_path = path / "task-packet-revision-0.md"
         packet_path.write_text(task_packet.rstrip() + "\n", encoding="utf-8")
         manifest = {
@@ -313,6 +313,7 @@ def prepare_run(
             "piPath": identity["piPath"],
             "piVersion": identity["piVersion"],
             "sessionDir": str(session_dir),
+            "scratchDir": str(scratch_dir),
             "workerExtension": str(PLUGIN_ROOT / "pi-extensions" / "worker-contract.ts"),
             "provider": options.get("provider"),
             "model": options.get("model"),
@@ -337,7 +338,7 @@ def handle_start(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(task_packet, str) or not task_packet.strip():
         raise LaneError("InvalidPacket", "taskPacket must be a non-empty string")
 
-    identity = require_compatible_pi()
+    identity = require_pi()
     allowed = normalize_allowed_paths(arguments.get("allowedPaths"))
     repository, base_commit = resolve_repository(arguments.get("repoRoot"), arguments.get("baseRef"))
     root = ensure_state_root()
@@ -435,7 +436,7 @@ def handle_batch_start(arguments: dict[str, Any]) -> dict[str, Any]:
     if arguments.get("executionMode") != "supervised-local":
         raise LaneError("UnsupportedExecutionMode", "only supervised-local is supported")
     lanes = normalize_parallel_lanes(arguments.get("lanes"))
-    identity = require_compatible_pi()
+    identity = require_pi()
     repository, base_commit = resolve_repository(arguments.get("repoRoot"), arguments.get("baseRef"))
     root = ensure_state_root()
     batch_id = str(uuid.uuid4())
@@ -507,7 +508,7 @@ def signal_lane_processes(pid: Any, pi_pid: Any, requested_signal: signal.Signal
 
 def abort_run(path: Path, reason: str) -> dict[str, Any]:
     status = read_json(path / "status.json")
-    if status.get("state") in TERMINAL_STATES:
+    if status.get("state") == "aborted":
         return public_snapshot(path)
     pid = status.get("pid")
     pi_pid = status.get("piPid")
@@ -538,6 +539,50 @@ def abort_run(path: Path, reason: str) -> dict[str, Any]:
     return public_snapshot(path)
 
 
+def pause_run(path: Path, reason: str) -> dict[str, Any]:
+    status = read_json(path / "status.json")
+    if status.get("state") in TERMINAL_STATES:
+        return public_snapshot(path)
+    pid = status.get("pid")
+    pi_pid = status.get("piPid")
+    revision = int(status.get("revision", 0))
+    pause_reason = reason or "paused by primary for recoverable review"
+    update_status(path, state="pausing", reason=pause_reason)
+    if process_alive(pid) or process_alive(pi_pid):
+        signal_lane_processes(pid, pi_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        while (process_alive(pid) or process_alive(pi_pid)) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if process_alive(pid) or process_alive(pi_pid):
+            signal_lane_processes(pid, pi_pid, signal.SIGKILL)
+    if process_alive(pid) or process_alive(pi_pid):
+        update_status(
+            path,
+            state="needs-attention",
+            reason="pause could not stop all Pi lane processes",
+            error={"code": "PauseFailed", "message": "Pi supervisor or worker is still alive"},
+        )
+        return public_snapshot(path)
+
+    try:
+        evidence = collect_git_evidence(path, revision)
+        error = None
+    except LaneError as exc:
+        evidence = status.get("evidence")
+        error = {"code": exc.code, "message": str(exc)}
+    update_status(
+        path,
+        state="needs-attention",
+        pid=None,
+        piPid=None,
+        reason=pause_reason,
+        finishedAt=time.time(),
+        evidence=evidence,
+        error=error,
+    )
+    return public_snapshot(path)
+
+
 def handle_drive(arguments: dict[str, Any]) -> dict[str, Any]:
     path = run_dir(arguments.get("runId", ""))
     if not (path / "manifest.json").exists():
@@ -553,6 +598,10 @@ def handle_drive(arguments: dict[str, Any]) -> dict[str, Any]:
     if directive == "abort":
         reason = arguments.get("reason")
         return abort_run(path, reason if isinstance(reason, str) else "")
+
+    if directive == "pause":
+        reason = arguments.get("reason")
+        return pause_run(path, reason if isinstance(reason, str) else "")
 
     if directive == "correct":
         with locked(ensure_state_root()):
@@ -591,7 +640,7 @@ def handle_drive(arguments: dict[str, Any]) -> dict[str, Any]:
             correction_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return spawn_turn(path, revision, correction_path)
 
-    raise LaneError("InvalidDirective", "directive must be wait, correct, or abort")
+    raise LaneError("InvalidDirective", "directive must be wait, pause, correct, or abort")
 
 
 def wait_for_batch_snapshot(batch_id: str, wait_ms: int) -> dict[str, Any]:
@@ -620,7 +669,13 @@ def handle_batch_drive(arguments: dict[str, Any]) -> dict[str, Any]:
         for path in paths:
             abort_run(path, message or "parallel wave aborted by primary")
         return public_batch_snapshot(batch_id)
-    raise LaneError("InvalidDirective", "directive must be wait or abort")
+    if directive == "pause":
+        reason = arguments.get("reason")
+        message = reason if isinstance(reason, str) else ""
+        for path in paths:
+            pause_run(path, message or "parallel wave paused by primary for recoverable review")
+        return public_batch_snapshot(batch_id)
+    raise LaneError("InvalidDirective", "directive must be wait, pause, or abort")
 
 
 HANDLERS = {

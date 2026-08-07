@@ -42,8 +42,10 @@ authorization is absent, explain the route and stop before calling `pi_lane_star
 4. Confirm the MCP tool list exposes `pi_lane_preflight`, `pi_lane_start`,
    `pi_lane_batch_start`, `pi_lane_drive`, and `pi_lane_batch_drive` from Sol Pi
    Advisor.
-5. Call `pi_lane_preflight`. Require Pi `0.83.0`, a usable Git executable, and an
-   available state directory. Record the actual Pi and Node paths; do not infer them.
+5. Call `pi_lane_preflight`. Require a usable Pi executable, Git executable, and
+   available state directory. Record the actual Pi version plus Pi and Node paths;
+   do not infer them. Do not reject an installed Pi based on its version number;
+   validate compatibility through the lane's observed behavior and verification.
 6. This release supports only `supervised-local` execution. Pi has no built-in
    sandbox. State that fact before starting a run and stop if the user requests an
    unattended or untrusted-repository execution boundary.
@@ -136,6 +138,19 @@ Pi prose and every structured handoff as claims. A `ready` lane is only a candid
 and must include host-observed Git evidence. Batch `ready` means every lane is ready
 for inspection, not that the combined feature is accepted.
 
+If a running lane needs safety inspection but may still be recoverable, use
+`directive: pause`, not `abort`. Pause stops the current turn, records Git evidence,
+and settles the lane as `needs-attention`; after primary inspection, a precise
+`correct` directive reuses the same run, Pi session, and worktree. Reserve `abort`
+for intentional permanent abandonment. Apply the same distinction to a parallel
+wave with `pi_lane_batch_drive`.
+
+Base policy decisions on the returned `policyBasis: git-worktree-state`, changed
+paths, dependency-state changes, violations, and digests. Command output is only
+diagnostic evidence. A line such as `Saved lockfile` does not prove a mutation when
+the host-observed Git state reports no lockfile change. Conversely, a clean-looking
+log never overrides an actual Git violation.
+
 Inspect each complete diff artifact and changed paths, confirm ownership, and rerun
 every stated verification command independently. If correction is required, call
 `pi_lane_drive` for that exact run with `directive: correct`, the precise
@@ -143,6 +158,13 @@ instruction, and concrete evidence. Corrections are lane-specific and allowed on
 after that Pi turn settles; they must reuse the same run, session, and worktree.
 Never send one sibling's defect as a correction to another sibling. Repeat
 monitoring and verification.
+
+Keep Pi verification focused, offline, and package-scoped. Dependency resolution,
+dependency installation, and repository-wide dead-code checks such as
+`bun run dead-code`, `bunx`, `npx`, or `knip` are primary-owned integration checks.
+If the lane environment lacks a dependency, Pi must report the blocked check and
+must not install, copy, or synthesize dependencies. Run disposable experiments only
+under the returned `scratchDir`, never as repository scratch files.
 
 Run the first acceptance gate as soon as the initial candidate is `ready`, before
 building a large correction packet:

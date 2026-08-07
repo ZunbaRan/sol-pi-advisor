@@ -31,6 +31,8 @@ review have explicit owners. Sol Pi Advisor enforces that separation:
   share one immutable base and must own pairwise-disjoint paths.
 - The host records the actual base commit, changed paths, full diff, and SHA-256
   digest instead of trusting the worker's prose.
+- The host checks Git policy after completed Bash and handoff calls; output text such as
+  `Saved lockfile` is diagnostic only and cannot establish a policy violation.
 - The primary task independently reruns verification and sends corrections back to
   the same Pi session.
 - A fresh GPT-5.6 Sol / High agent performs the final read-only review and returns
@@ -46,16 +48,19 @@ through this workflow. Those actions remain with the primary Sol task.
 > should be used only with trusted repositories. Worktree isolation protects Git
 > state; it is not a security boundary.
 
-The plugin restricts Pi's write tools to paths selected by the primary task and
-blocks Git history, remote, worktree, and PR operations. The primary still needs to
-inspect the returned diff before integrating it.
+The plugin restricts Pi's write tools to paths selected by the primary task (plus a
+run-owned scratch directory), blocks Git history, remote, worktree, and PR
+operations, and stops a turn when host-observed Git state introduces an ownership
+violation. Dependency installers/resolvers and repository-wide dead-code commands
+are primary-owned. The primary still needs to inspect the returned diff before
+integrating it.
 
 ## Requirements
 
 - Codex CLI with plugin and multi-agent support
 - A GPT-5.6 Sol primary task using `high`, `xhigh`, or `max` reasoning
 - Git, Python 3, a POSIX shell, and Node.js
-- `@earendil-works/pi-coding-agent` version `0.83.0`
+- An installed `@earendil-works/pi-coding-agent` CLI
 
 By default, the plugin discovers Pi under `~/.nvm/versions/node/*`. Set both
 `SOL_PI_NODE` and `SOL_PI_CLI` when Node or Pi lives elsewhere.
@@ -100,10 +105,12 @@ review.
 and detached worktree. The server resolves one base commit for the whole wave and
 rejects exact or parent/child ownership overlap before creating any worktree.
 
-Use `pi_lane_batch_drive` to wait until every lane settles or to abort all lanes
-that are still active. Send fixes with ordinary `pi_lane_drive` against the exact
-affected run. A batch becoming `ready` means all lane candidates are available for
-independent Sol inspection—it does not mean their combined behavior is accepted.
+Use `pi_lane_batch_drive` to wait until every lane settles, recoverably pause active
+lanes for inspection, or permanently abort them. A pause settles as
+`needs-attention`; send fixes with ordinary `pi_lane_drive` against the exact run
+to reuse its Pi session and worktree. A batch becoming `ready` means all lane
+candidates are available for independent Sol inspection—it does not mean their
+combined behavior is accepted.
 
 Tasks that share files, generated outputs, lockfiles, migrations, or unaccepted
 interfaces belong in separate dependency waves and remain serial.
@@ -155,6 +162,7 @@ plugins/sol-pi-advisor/
 - Parallel lanes require the same base commit, no sibling dependency, frozen shared
   contracts, and pairwise-disjoint path ownership
 - `supervised-local` execution only
-- Pi `0.83.0` is required exactly
+- Pi is not version-pinned; preflight records the installed version, while actual
+  lane behavior and verification determine compatibility
 - The plugin produces a working-tree diff; it does not commit, push, merge, or
   create pull requests

@@ -69,7 +69,7 @@ import time
 
 args = sys.argv[2:]
 if "--version" in args:
-    print("0.83.0")
+    print("999.0.0-test")
     raise SystemExit(0)
 
 message = next((item[1:] for item in args if item.startswith("@")), None)
@@ -78,8 +78,24 @@ matched = re.search(r"^TARGET: (.+)$", text, re.MULTILINE)
 relative_target = matched.group(1).split("\\\\n", 1)[0].strip() if matched else "src/implemented.txt"
 target = pathlib.Path.cwd() / relative_target
 target.parent.mkdir(parents=True, exist_ok=True)
-time.sleep(0.4)
+if "PAUSE_WAIT" in text:
+    time.sleep(5)
+else:
+    time.sleep(0.4)
+remove_match = re.search(r"^REMOVE: (.+)$", text, re.MULTILINE)
+if remove_match:
+    remove_target = pathlib.Path.cwd() / remove_match.group(1).split("\\\\n", 1)[0].strip()
+    remove_target.unlink(missing_ok=True)
 target.write_text("corrected\\n" if "CORRECTION" in text else "implemented\\n")
+if "LOG_SAVED_LOCKFILE" in text:
+    print("Saved lockfile", flush=True)
+violation_match = re.search(r"^VIOLATE: (.+)$", text, re.MULTILINE)
+if violation_match:
+    violation_target = pathlib.Path.cwd() / violation_match.group(1).split("\\\\n", 1)[0].strip()
+    violation_target.parent.mkdir(parents=True, exist_ok=True)
+    violation_target.write_text("outside ownership\\n")
+    print(json.dumps({"type": "tool_execution_end", "toolName": "bash", "result": {"details": {}}}), flush=True)
+    time.sleep(5)
 handoff = {
     "status": "complete",
     "objective": "fake implementation",
@@ -88,9 +104,9 @@ handoff = {
     "gaps": [],
     "judgmentCalls": [],
 }
-print(json.dumps({"type": "session", "version": 3, "id": "fake-session", "cwd": str(pathlib.Path.cwd())}))
-print(json.dumps({"type": "tool_execution_end", "toolName": "submit_handoff", "result": {"details": handoff}}))
-print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}))
+print(json.dumps({"type": "session", "version": 3, "id": "fake-session", "cwd": str(pathlib.Path.cwd())}), flush=True)
+print(json.dumps({"type": "tool_execution_end", "toolName": "submit_handoff", "result": {"details": handoff}}), flush=True)
+print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flush=True)
 """,
     )
 
@@ -134,7 +150,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}))
                 "arguments": {
                     "repoRoot": str(repo),
                     "baseRef": "HEAD",
-                    "taskPacket": "ROLE\\nImplement the fake task.\\n",
+                    "taskPacket": "ROLE\\nImplement the fake task.\\nLOG_SAVED_LOCKFILE\\n",
                     "allowedPaths": ["src"],
                     "executionMode": "supervised-local",
                 },
@@ -144,6 +160,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}))
     assert started_result["isError"] is False, started_result
     started = started_result["structuredContent"]
     run_id = started["runId"]
+    assert started["pi"]["version"] == "999.0.0-test"
 
     deadline = time.monotonic() + 10
     snapshot = started
@@ -166,9 +183,14 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}))
 
     assert snapshot["state"] == "ready", snapshot
     assert snapshot["revision"] == 0
+    assert snapshot["evidence"]["policyBasis"] == "git-worktree-state"
+    assert snapshot["evidence"]["stdoutUsedForPolicy"] is False
+    assert snapshot["evidence"]["dependencyStateChanges"] == []
+    assert snapshot["observed"]["protocolWarnings"] == ["non-JSON stdout line"]
     assert snapshot["evidence"]["changedPaths"] == ["src/implemented.txt"]
     assert snapshot["evidence"]["violations"] == []
     assert Path(snapshot["evidence"]["diffArtifact"]).is_file()
+    assert Path(snapshot["scratchDir"]).is_dir()
 
     corrected_result = exchange(
         process,
@@ -213,6 +235,180 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}))
     assert snapshot["revision"] == 1
     assert (Path(snapshot["worktree"]) / "src" / "implemented.txt").read_text() == "corrected\n"
     assert snapshot["piSessionId"] == run_id
+
+    live_violation_result = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "taskPacket": "TARGET: src/live.txt\nVIOLATE: outside/scratch.txt\n",
+                    "allowedPaths": ["src"],
+                    "executionMode": "supervised-local",
+                },
+            },
+        },
+    )
+    assert live_violation_result["isError"] is False, live_violation_result
+    live_snapshot = live_violation_result["structuredContent"]
+    live_run_id = live_snapshot["runId"]
+    deadline = time.monotonic() + 10
+    while live_snapshot["state"] not in {"ready", "needs-attention", "failed", "aborted"}:
+        assert time.monotonic() < deadline, live_snapshot
+        waited = exchange(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "tools/call",
+                "params": {
+                    "name": "pi_lane_drive",
+                    "arguments": {
+                        "runId": live_run_id,
+                        "directive": "wait",
+                        "waitMs": 1000,
+                    },
+                },
+            },
+        )
+        assert waited["isError"] is False, waited
+        live_snapshot = waited["structuredContent"]
+    assert live_snapshot["state"] == "needs-attention", live_snapshot
+    assert live_snapshot["observed"]["policyStop"]["code"] == "LiveGitPolicyViolation"
+    assert live_snapshot["observed"]["policyStop"]["stdoutUsedForPolicy"] is False
+    assert live_snapshot["evidence"]["outsideAllowedPaths"] == ["outside/scratch.txt"]
+
+    recovered_result = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": live_run_id,
+                    "directive": "correct",
+                    "instruction": "TARGET: src/live.txt\nREMOVE: outside/scratch.txt\nRemove the unauthorized scratch file.",
+                    "evidence": ["Git evidence found outside/scratch.txt outside ownership."],
+                },
+            },
+        },
+    )
+    assert recovered_result["isError"] is False, recovered_result
+    live_snapshot = recovered_result["structuredContent"]
+    deadline = time.monotonic() + 10
+    while live_snapshot["state"] not in {"ready", "needs-attention", "failed", "aborted"}:
+        assert time.monotonic() < deadline, live_snapshot
+        waited = exchange(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 103,
+                "method": "tools/call",
+                "params": {
+                    "name": "pi_lane_drive",
+                    "arguments": {
+                        "runId": live_run_id,
+                        "directive": "wait",
+                        "waitMs": 1000,
+                    },
+                },
+            },
+        )
+        assert waited["isError"] is False, waited
+        live_snapshot = waited["structuredContent"]
+    assert live_snapshot["state"] == "ready", live_snapshot
+    assert live_snapshot["revision"] == 1
+    assert live_snapshot["evidence"]["outsideAllowedPaths"] == []
+
+    pause_result = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "taskPacket": "TARGET: pause/value.txt\nPAUSE_WAIT\n",
+                    "allowedPaths": ["pause"],
+                    "executionMode": "supervised-local",
+                },
+            },
+        },
+    )
+    assert pause_result["isError"] is False, pause_result
+    pause_snapshot = pause_result["structuredContent"]
+    paused = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": pause_snapshot["runId"],
+                    "directive": "pause",
+                    "reason": "inspect a recoverable safety concern",
+                },
+            },
+        },
+    )
+    assert paused["isError"] is False, paused
+    pause_snapshot = paused["structuredContent"]
+    assert pause_snapshot["state"] == "needs-attention", pause_snapshot
+    assert pause_snapshot["reason"] == "inspect a recoverable safety concern"
+    paused_correction = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": pause_snapshot["runId"],
+                    "directive": "correct",
+                    "instruction": "TARGET: pause/value.txt\nComplete after the recoverable pause.",
+                    "evidence": ["Primary inspection permits the same session to continue."],
+                },
+            },
+        },
+    )
+    assert paused_correction["isError"] is False, paused_correction
+    pause_snapshot = paused_correction["structuredContent"]
+    deadline = time.monotonic() + 10
+    while pause_snapshot["state"] not in {"ready", "needs-attention", "failed", "aborted"}:
+        assert time.monotonic() < deadline, pause_snapshot
+        waited = exchange(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 107,
+                "method": "tools/call",
+                "params": {
+                    "name": "pi_lane_drive",
+                    "arguments": {
+                        "runId": pause_snapshot["runId"],
+                        "directive": "wait",
+                        "waitMs": 1000,
+                    },
+                },
+            },
+        )
+        assert waited["isError"] is False, waited
+        pause_snapshot = waited["structuredContent"]
+    assert pause_snapshot["state"] == "ready", pause_snapshot
+    assert pause_snapshot["revision"] == 1
 
     runs_root = root / "codex" / "sol-pi-advisor" / "runs"
     worktrees_root = root / "codex" / "sol-pi-advisor" / "worktrees"

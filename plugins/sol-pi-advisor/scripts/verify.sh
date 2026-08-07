@@ -41,6 +41,8 @@ grep -q 'pi_lane_start' "$skill" || fail 'Pi start tool is missing.'
 grep -q 'pi_lane_batch_start' "$skill" || fail 'Pi parallel start tool is missing.'
 grep -q 'pi_lane_drive' "$skill" || fail 'Pi drive tool is missing.'
 grep -q 'pi_lane_batch_drive' "$skill" || fail 'Pi parallel drive tool is missing.'
+grep -q 'directive: pause' "$skill" || fail 'recoverable pause contract is missing.'
+grep -q 'policyBasis: git-worktree-state' "$skill" || fail 'Git-evidence policy contract is missing.'
 grep -q 'sol_pi_advisor_sol_reviewer' "$skill" || fail 'reviewer role is missing.'
 grep -q 'supervised-local' "$skill" || fail 'execution boundary is missing.'
 grep -q '`high`, `xhigh`, or' "$skill" || fail 'eligible primary reasoning levels are missing.'
@@ -65,6 +67,19 @@ if grep -R -n 'gpt-5.6-luna\|luna_worker\|sol_luna_advisor' \
   "$plugin_dir/mcp" "$plugin_dir/pi-extensions" >/dev/null; then
   fail 'a Luna implementation path is wired into Sol Pi Advisor.'
 fi
+
+if grep -R -n 'SUPPORTED_PI_VERSION\|supportedPiVersion\|versionCompatible\|PiVersionMismatch' \
+  "$plugin_dir/mcp" "$plugin_dir/skills/orchestration" >/dev/null; then
+  fail 'a Pi version gate is wired into Sol Pi Advisor.'
+fi
+
+grep -q 'SOL_PI_SCRATCH_DIR' "$plugin_dir/mcp/run_worker.py" ||
+  fail 'run-owned scratch directory is not wired into the worker.'
+grep -q 'collect_git_policy_snapshot' "$plugin_dir/mcp/run_worker.py" ||
+  fail 'live Git policy monitoring is not wired into the worker.'
+grep -q 'Dependency-resolving commands are primary-owned' \
+  "$plugin_dir/pi-extensions/worker-contract.ts" ||
+  fail 'dependency-resolution command guard is missing.'
 
 sh -n "$installer" || fail 'installer shell syntax is invalid.'
 sh -n "$plugin_dir/scripts/check-pi.sh" || fail 'check-pi shell syntax is invalid.'
@@ -100,8 +115,9 @@ import pathlib
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert data["piVersion"] == "0.83.0"
-assert data["versionCompatible"] is True
+assert isinstance(data["piVersion"], str) and data["piVersion"].strip()
+assert "supportedPiVersion" not in data
+assert "versionCompatible" not in data
 assert data["sandboxEnforced"] is False
 assert data["executionModes"] == ["supervised-local"]
 PY

@@ -12,10 +12,25 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 
-SUPPORTED_PI_VERSION = "0.83.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RUN_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 LANE_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+DEPENDENCY_STATE_FILENAMES = frozenset(
+    {
+        "bun.lock",
+        "bun.lockb",
+        "deno.lock",
+        "npm-shrinkwrap.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.lock",
+        "Pipfile.lock",
+        "poetry.lock",
+        "uv.lock",
+        "go.sum",
+    }
+)
 
 
 class LaneError(RuntimeError):
@@ -159,8 +174,6 @@ def preflight() -> dict[str, Any]:
     root = ensure_state_root()
     return {
         **identity,
-        "supportedPiVersion": SUPPORTED_PI_VERSION,
-        "versionCompatible": identity["piVersion"] == SUPPORTED_PI_VERSION,
         "gitPath": git,
         "gitVersion": git_version,
         "stateRoot": str(root),
@@ -252,7 +265,7 @@ def _nul_paths(command: list[str], cwd: Path) -> list[str]:
     return [item.decode("utf-8", errors="surrogateescape") for item in completed.stdout.split(b"\0") if item]
 
 
-def collect_git_evidence(run_path: Path, revision: int) -> dict[str, Any]:
+def collect_git_policy_snapshot(run_path: Path) -> dict[str, Any]:
     manifest = read_json(run_path / "manifest.json")
     worktree = Path(manifest["worktree"])
     base = manifest["baseCommit"]
@@ -272,6 +285,54 @@ def collect_git_evidence(run_path: Path, revision: int) -> dict[str, Any]:
         ["git", "ls-files", "--others", "--exclude-standard", "-z"], worktree
     )
     changed = sorted(set(tracked + staged + untracked))
+
+    violations: list[dict[str, str]] = []
+    if head != base:
+        violations.append({"code": "HeadMoved", "detail": f"HEAD {head} != base {base}"})
+    if staged:
+        violations.append({"code": "IndexModified", "detail": ", ".join(staged)})
+    outside = [path for path in changed if not path_is_allowed(path, allowed)]
+    if outside:
+        violations.append({"code": "OwnershipViolation", "detail": ", ".join(outside)})
+
+    dependency_state_changes = [
+        path for path in changed if PurePosixPath(path).name in DEPENDENCY_STATE_FILENAMES
+    ]
+    digest_payload = {
+        "baseCommit": base,
+        "head": head,
+        "changedPaths": changed,
+        "stagedPaths": sorted(staged),
+        "untrackedPaths": sorted(untracked),
+        "outsideAllowedPaths": outside,
+        "dependencyStateChanges": dependency_state_changes,
+    }
+    state_digest = hashlib.sha256(
+        json.dumps(digest_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    return {
+        "policyBasis": "git-worktree-state",
+        "stdoutUsedForPolicy": False,
+        "worktree": str(worktree),
+        "baseCommit": base,
+        "head": head,
+        "changedPaths": changed,
+        "stagedPaths": sorted(staged),
+        "untrackedPaths": sorted(untracked),
+        "outsideAllowedPaths": outside,
+        "dependencyStateChanges": dependency_state_changes,
+        "allowedPaths": allowed,
+        "stateDigest": state_digest,
+        "violations": violations,
+    }
+
+
+def collect_git_evidence(run_path: Path, revision: int) -> dict[str, Any]:
+    policy = collect_git_policy_snapshot(run_path)
+    worktree = Path(policy["worktree"])
+    base = policy["baseCommit"]
+    untracked = policy["untrackedPaths"]
 
     diff_result = subprocess.run(
         ["git", "diff", "--binary", "--no-ext-diff", base],
@@ -309,25 +370,10 @@ def collect_git_evidence(run_path: Path, revision: int) -> dict[str, Any]:
     diff_path.write_bytes(bytes(artifact))
     digest = hashlib.sha256(bytes(artifact)).hexdigest()
 
-    violations: list[dict[str, str]] = []
-    if head != base:
-        violations.append({"code": "HeadMoved", "detail": f"HEAD {head} != base {base}"})
-    if staged:
-        violations.append({"code": "IndexModified", "detail": ", ".join(staged)})
-    outside = [path for path in changed if not path_is_allowed(path, allowed)]
-    if outside:
-        violations.append({"code": "OwnershipViolation", "detail": ", ".join(outside)})
-
     return {
-        "worktree": str(worktree),
-        "baseCommit": base,
-        "head": head,
-        "changedPaths": changed,
-        "untrackedPaths": sorted(untracked),
-        "allowedPaths": allowed,
+        **policy,
         "diffArtifact": str(diff_path),
         "diffDigest": digest,
-        "violations": violations,
     }
 
 
@@ -365,7 +411,7 @@ def active_run_for_repository(repo_root: Path) -> str | None:
         status = read_json(status_path)
         if manifest.get("repoRoot") != str(repo_root):
             continue
-        if status.get("state") in {"preparing", "running", "aborting"} and process_alive(status.get("pid")):
+        if status.get("state") in {"preparing", "running", "pausing", "aborting"} and process_alive(status.get("pid")):
             return candidate.name
     return None
 

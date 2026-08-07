@@ -17,6 +17,8 @@ packet and worktree.
    worktree, base commit, revision, and process.
 6. Wait using bounded `pi_lane_drive` calls for a serial lane or
    `pi_lane_batch_drive` for a parallel wave until all relevant lanes settle.
+   Use `pause` for a recoverable safety review and `abort` only for permanent
+   abandonment.
 7. Inspect host-observed evidence and the actual worktree. Rerun checks independently.
 8. Send corrections to the same run with `pi_lane_drive`; wait, inspect, and verify
    again.
@@ -86,9 +88,9 @@ STARTING STATE
 
 VERIFICATION
 - Baseline: <Focused test/lint/type-check commands and known failures before implementation.>
-- Run: <focused command>
+- Pi run: <focused, offline, package-scoped command that cannot install or resolve dependencies>
   Success: <expected exit status and concrete evidence>
-- Run: <broader command when needed>
+- Primary run after handoff: <repository-wide, dependency-resolving, dead-code, or integration command>
   Success: <expected exit status and concrete evidence>
 - First-candidate gate: <scope estimate comparison, package lint/type-check, standards/spec review.>
 - Inspect: <diff, artifact, or runtime behavior>
@@ -99,6 +101,11 @@ GIT / PR BOUNDARY
 - Do not run git add, commit, push, fetch, pull, merge, rebase, cherry-pick, reset,
   clean, checkout, switch, branch, tag, stash, or any PR command.
 - Do not alter HEAD, refs, the index, `.git`, or another worktree.
+- Put disposable experiments under `$SOL_PI_SCRATCH_DIR`; do not create repository
+  scratch files.
+- Do not run dependency installers/resolvers (`bunx`, `npx`, package-manager
+  install/update commands) or repository-wide dead-code checks. Report those as
+  primary-owned verification gaps instead of working around the restriction.
 
 FINAL HANDOFF
 Your final action must call `submit_handoff` exactly once with:
@@ -120,6 +127,11 @@ run state. In a parallel wave, accept or reject every lane independently. Then
 apply only accepted patch artifacts to a dedicated integration worktree in DAG
 order and run cross-lane verification. Corrections remain in the original run, Pi
 session, and worktree.
+
+Host-observed Git state and its digests are authoritative for mutation policy.
+Never infer a lockfile or manifest mutation from command prose alone; confirm the
+path in `dependencyStateChanges` or the actual diff. Use a recoverable pause while
+that evidence is being inspected.
 
 Do not accept a task packet that bundles independent product slices merely because
 their files share a feature name. Do not use corrections as incremental discovery
