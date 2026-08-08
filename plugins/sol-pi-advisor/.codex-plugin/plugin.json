@@ -1,7 +1,7 @@
 {
   "name": "sol-pi-advisor",
-  "version": "0.1.0+codex.20260807125523",
-  "description": "Sol plans and accepts, one or more safe local Pi lanes implement, and a fresh Sol reviewer gives the final verdict.",
+  "version": "0.1.0+codex.20260808040918",
+  "description": "The primary task plans and accepts, one or more safe local Pi lanes implement, and a fresh Sol reviewer gives the final verdict.",
   "author": {
     "name": "loloru"
   },
@@ -16,8 +16,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Sol Pi Advisor",
-    "shortDescription": "Sol directs serial or parallel Pi implementation and fresh Sol review.",
-    "longDescription": "A supervised local delivery workflow: the primary Sol task owns architecture and acceptance, one Pi lane or a safe parallel wave implements in isolated Git worktrees, and a fresh read-only Sol agent reviews the integrated accepted diff.",
+    "shortDescription": "A primary task directs Pi implementation and fresh Sol review.",
+    "longDescription": "A first-principles supervised delivery workflow: the primary creates an issues.md execution ledger, dispatches only READY items, excludes user-suspended non-blocking items, binds every fine-grained issue ID to one Pi run/session, permits two matching corrections, gives exhausted micro-fixes at most two primary rounds, and obtains fresh read-only Sol review.",
     "developerName": "loloru",
     "category": "Productivity",
     "capabilities": [
@@ -27,7 +27,7 @@
     ],
     "defaultPrompt": [
       "Use Sol Pi Advisor to implement this task through local Pi and fresh Sol review.",
-      "Plan a dependency DAG in Sol, delegate serial or safe parallel implementation to Pi, verify and integrate the diffs, then obtain fresh Sol review."
+      "Derive the goal from first principles into a repository-root issues.md ledger, assign stable IDs, schedule only READY fine-grained items through one bound Pi run/session with at most two matching corrections, exclude user-suspended non-blocking items until explicitly resumed, verify the results, then obtain fresh Sol review."
     ]
   }
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -38,15 +39,109 @@ SERVER_INFO = {"name": "sol-pi-advisor", "version": "0.1.0"}
 TERMINAL_STATES = {"ready", "needs-attention", "failed", "aborted"}
 ACTIVE_STATES = {"preparing", "running", "pausing", "aborting"}
 MAX_PARALLEL_LANES = 4
+MAX_PI_CORRECTIONS_PER_ISSUE = 2
+ISSUE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+ISSUE_STATUSES = {
+    "READY",
+    "IN_PROGRESS",
+    "VERIFYING",
+    "PRIMARY_REPAIR",
+    "RESOLVED",
+    "OPEN",
+    "SUSPENDED",
+}
+DISPATCHABLE_ISSUE_STATUS = "READY"
+
+
+def normalize_issue_id(value: Any) -> str:
+    if not isinstance(value, str) or not ISSUE_ID_RE.fullmatch(value):
+        raise LaneError(
+            "InvalidIssueId",
+            "issueId must be a stable lowercase ID using letters, digits, dots, underscores, or hyphens",
+        )
+    return value
+
+
+def require_issue_ledger(
+    repository: Path,
+    issue_ids: list[str],
+    *,
+    required_status: str | None = None,
+    reject_suspended: bool = False,
+) -> Path:
+    ledger = repository / "issues.md"
+    try:
+        text = ledger.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise LaneError(
+            "IssueLedgerMissing",
+            f"create repository-root issues.md before starting Pi: {ledger}",
+        ) from exc
+    for issue_id in issue_ids:
+        pattern = re.compile(
+            rf"^##[ \t]+{re.escape(issue_id)}(?:[ \t]*:|[ \t]*$)", re.MULTILINE
+        )
+        matches = list(pattern.finditer(text))
+        count = len(matches)
+        if count == 0:
+            raise LaneError(
+                "IssueLedgerEntryMissing",
+                f"issues.md has no heading for {issue_id}",
+            )
+        if count > 1:
+            raise LaneError(
+                "IssueLedgerEntryDuplicate",
+                f"issues.md has duplicate headings for {issue_id}",
+            )
+        section_start = matches[0].end()
+        next_heading = re.search(r"^##\s+", text[section_start:], re.MULTILINE)
+        section_end = (
+            section_start + next_heading.start() if next_heading is not None else len(text)
+        )
+        section = text[section_start:section_end]
+        status_matches = re.findall(
+            r"^-\s*Status:\s*([A-Z][A-Z_]*)\s*$", section, re.MULTILINE
+        )
+        if not status_matches:
+            raise LaneError(
+                "IssueLedgerStatusMissing",
+                f"issues.md entry {issue_id} must declare exactly one '- Status: <STATUS>' line",
+            )
+        if len(status_matches) > 1:
+            raise LaneError(
+                "IssueLedgerStatusDuplicate",
+                f"issues.md entry {issue_id} has duplicate Status fields",
+            )
+        status = status_matches[0]
+        if status not in ISSUE_STATUSES:
+            raise LaneError(
+                "IssueLedgerStatusInvalid",
+                f"issues.md entry {issue_id} has unsupported status {status}",
+            )
+        if status == "SUSPENDED" and (reject_suspended or required_status is not None):
+            raise LaneError(
+                "IssueSuspended",
+                f"issue {issue_id} is SUSPENDED and excluded from Pi scheduling and correction",
+            )
+        if required_status is not None and status != required_status:
+            raise LaneError(
+                "IssueNotReady",
+                f"issue {issue_id} must be {required_status} before Pi dispatch; current status is {status}",
+            )
+    return ledger
 
 
 PARALLEL_LANE_SCHEMA = {
     "type": "object",
-    "required": ["laneId", "taskPacket", "allowedPaths"],
+    "required": ["laneId", "issueId", "taskPacket", "allowedPaths"],
     "properties": {
         "laneId": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,63}$",
+        },
+        "issueId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         },
         "taskPacket": {"type": "string", "minLength": 1},
         "allowedPaths": {
@@ -73,12 +168,13 @@ TOOLS = [
     },
     {
         "name": "pi_lane_start",
-        "description": "Start one supervised local Pi implementation turn in a new detached Git worktree. Returns immediately with a durable run identity.",
+        "description": "Start one READY issues.md work item in a supervised local Pi turn and bind its stable issueId to a new detached worktree, run, and session. SUSPENDED issues are excluded.",
         "inputSchema": {
             "type": "object",
             "required": [
                 "repoRoot",
                 "baseRef",
+                "issueId",
                 "taskPacket",
                 "allowedPaths",
                 "executionMode",
@@ -86,6 +182,10 @@ TOOLS = [
             "properties": {
                 "repoRoot": {"type": "string"},
                 "baseRef": {"type": "string"},
+                "issueId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                },
                 "taskPacket": {"type": "string", "minLength": 1},
                 "allowedPaths": {
                     "type": "array",
@@ -105,7 +205,7 @@ TOOLS = [
     },
     {
         "name": "pi_lane_batch_start",
-        "description": "Start one safe parallel wave of 2-4 independent Pi lanes from the same Git base. Each lane receives its own detached worktree and must own repository paths that do not overlap any sibling lane.",
+        "description": "Start one safe parallel wave of 2-4 independent READY issues.md work items from the same Git base. Each lane binds one unique issueId to its own Pi run, session, detached worktree, and disjoint ownership; SUSPENDED issues are excluded.",
         "inputSchema": {
             "type": "object",
             "required": ["repoRoot", "baseRef", "lanes", "executionMode"],
@@ -125,7 +225,7 @@ TOOLS = [
     },
     {
         "name": "pi_lane_drive",
-        "description": "Wait for, recoverably pause, correct, or permanently abort an existing Pi run. Pause settles as needs-attention so correction can reuse the same Pi session and worktree.",
+        "description": "Wait for, recoverably pause, correct, or permanently abort an existing Pi run. Corrections reuse the same Pi session and require a stable root-cause issueId; one issue is limited to two Pi correction attempts.",
         "inputSchema": {
             "type": "object",
             "required": ["runId", "directive"],
@@ -138,6 +238,14 @@ TOOLS = [
                 "waitMs": {"type": "integer", "minimum": 0, "maximum": 30000},
                 "instruction": {"type": "string"},
                 "evidence": {"type": "array", "items": {"type": "string"}},
+                "issueId": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+                    "description": (
+                        "Stable core-root-cause identifier required for correct; "
+                        "the same defect must reuse the same ID."
+                    ),
+                },
                 "reason": {"type": "string"},
             },
             "additionalProperties": False,
@@ -167,6 +275,8 @@ def public_snapshot(run_path: Path) -> dict[str, Any]:
     return {
         "runId": manifest["runId"],
         "piSessionId": manifest["piSessionId"],
+        "issueId": manifest["issueId"],
+        "issueLedgerPath": manifest["issueLedgerPath"],
         "batchId": manifest.get("batchId"),
         "laneId": manifest.get("laneId"),
         "parallelLaneCount": manifest.get("parallelLaneCount"),
@@ -180,6 +290,9 @@ def public_snapshot(run_path: Path) -> dict[str, Any]:
         "allowedPaths": manifest["allowedPaths"],
         "pid": status.get("pid"),
         "piPid": status.get("piPid"),
+        "issueAttempts": status.get("issueAttempts", {}),
+        "activeIssue": status.get("activeIssue"),
+        "limits": {"piCorrectionsPerIssue": MAX_PI_CORRECTIONS_PER_ISSUE},
         "pi": {
             "version": manifest["piVersion"],
             "nodePath": manifest["nodePath"],
@@ -197,7 +310,13 @@ def public_snapshot(run_path: Path) -> dict[str, Any]:
     }
 
 
-def spawn_turn(run_path: Path, revision: int, message_file: Path) -> dict[str, Any]:
+def spawn_turn(
+    run_path: Path,
+    revision: int,
+    message_file: Path,
+    *,
+    status_changes: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     log_path = run_path / "supervisor.log"
     with log_path.open("a", encoding="utf-8") as log:
         process = subprocess.Popen(
@@ -216,18 +335,20 @@ def spawn_turn(run_path: Path, revision: int, message_file: Path) -> dict[str, A
             stderr=log,
             start_new_session=True,
         )
-    update_status(
-        run_path,
-        state="preparing",
-        revision=revision,
-        pid=process.pid,
-        piPid=None,
-        reason="Pi turn is starting",
-        handoff=None,
-        observed=None,
-        evidence=None,
-        error=None,
-    )
+    changes = {
+        "state": "preparing",
+        "revision": revision,
+        "pid": process.pid,
+        "piPid": None,
+        "reason": "Pi turn is starting",
+        "handoff": None,
+        "observed": None,
+        "evidence": None,
+        "error": None,
+    }
+    if status_changes:
+        changes.update(status_changes)
+    update_status(run_path, **changes)
     return public_snapshot(run_path)
 
 
@@ -238,6 +359,11 @@ def handle_preflight(_: dict[str, Any]) -> dict[str, Any]:
         "maximumLanes": MAX_PARALLEL_LANES,
         "requiresSameBaseCommit": True,
         "requiresDisjointAllowedPaths": True,
+    }
+    result["limits"] = {"piCorrectionsPerIssue": MAX_PI_CORRECTIONS_PER_ISSUE}
+    result["issueLedger"] = {
+        "dispatchableStatuses": [DISPATCHABLE_ISSUE_STATUS],
+        "excludedStatuses": ["SUSPENDED"],
     }
     return result
 
@@ -303,6 +429,8 @@ def prepare_run(
         manifest = {
             "runId": run_id,
             "piSessionId": run_id,
+            "issueId": options["issueId"],
+            "issueLedgerPath": str(repository / "issues.md"),
             "repoRoot": str(repository),
             "baseCommit": base_commit,
             "worktree": str(worktree),
@@ -324,7 +452,14 @@ def prepare_run(
             **({"parallelLaneCount": parallel_lane_count} if parallel_lane_count else {}),
         }
         atomic_write_json(path / "manifest.json", manifest)
-        atomic_write_json(path / "status.json", {"state": "preparing", "revision": 0})
+        atomic_write_json(
+            path / "status.json",
+            {
+                "state": "preparing",
+                "revision": 0,
+                "issueAttempts": {options["issueId"]: 0},
+            },
+        )
         return path, packet_path
     except BaseException:
         rollback_prepared_run(repository, path, worktree)
@@ -337,10 +472,14 @@ def handle_start(arguments: dict[str, Any]) -> dict[str, Any]:
     task_packet = arguments.get("taskPacket")
     if not isinstance(task_packet, str) or not task_packet.strip():
         raise LaneError("InvalidPacket", "taskPacket must be a non-empty string")
+    issue_id = normalize_issue_id(arguments.get("issueId"))
 
     identity = require_pi()
     allowed = normalize_allowed_paths(arguments.get("allowedPaths"))
     repository, base_commit = resolve_repository(arguments.get("repoRoot"), arguments.get("baseRef"))
+    require_issue_ledger(
+        repository, [issue_id], required_status=DISPATCHABLE_ISSUE_STATUS
+    )
     root = ensure_state_root()
     with locked(root):
         existing = active_run_for_repository(repository)
@@ -352,7 +491,7 @@ def handle_start(arguments: dict[str, Any]) -> dict[str, Any]:
             identity,
             task_packet,
             allowed,
-            arguments,
+            {**arguments, "issueId": issue_id},
         )
         try:
             return spawn_turn(path, 0, packet_path)
@@ -370,6 +509,7 @@ def normalize_parallel_lanes(value: Any) -> list[dict[str, Any]]:
         )
     lanes: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_issue_ids: set[str] = set()
     for raw in value:
         if not isinstance(raw, dict):
             raise LaneError("InvalidParallelWave", "each lane must be an object")
@@ -377,6 +517,10 @@ def normalize_parallel_lanes(value: Any) -> list[dict[str, Any]]:
         if lane_id in seen_ids:
             raise LaneError("InvalidParallelWave", f"duplicate laneId: {lane_id}")
         seen_ids.add(lane_id)
+        issue_id = normalize_issue_id(raw.get("issueId"))
+        if issue_id in seen_issue_ids:
+            raise LaneError("InvalidParallelWave", f"duplicate issueId: {issue_id}")
+        seen_issue_ids.add(issue_id)
         task_packet = raw.get("taskPacket")
         if not isinstance(task_packet, str) or not task_packet.strip():
             raise LaneError("InvalidPacket", f"taskPacket is required for lane {lane_id}")
@@ -384,6 +528,7 @@ def normalize_parallel_lanes(value: Any) -> list[dict[str, Any]]:
             {
                 **raw,
                 "laneId": lane_id,
+                "issueId": issue_id,
                 "taskPacket": task_packet,
                 "allowedPaths": normalize_allowed_paths(raw.get("allowedPaths")),
             }
@@ -438,6 +583,11 @@ def handle_batch_start(arguments: dict[str, Any]) -> dict[str, Any]:
     lanes = normalize_parallel_lanes(arguments.get("lanes"))
     identity = require_pi()
     repository, base_commit = resolve_repository(arguments.get("repoRoot"), arguments.get("baseRef"))
+    require_issue_ledger(
+        repository,
+        [lane["issueId"] for lane in lanes],
+        required_status=DISPATCHABLE_ISSUE_STATUS,
+    )
     root = ensure_state_root()
     batch_id = str(uuid.uuid4())
     prepared: list[tuple[Path, Path]] = []
@@ -617,6 +767,37 @@ def handle_drive(arguments: dict[str, Any]) -> dict[str, Any]:
             evidence = arguments.get("evidence", [])
             if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
                 raise LaneError("InvalidCorrection", "evidence must be an array of strings")
+            issue_id = normalize_issue_id(arguments.get("issueId"))
+            manifest = read_json(path / "manifest.json")
+            run_issue_id = manifest.get("issueId")
+            if not isinstance(run_issue_id, str) or not ISSUE_ID_RE.fullmatch(run_issue_id):
+                raise LaneError("StateCorrupt", "run manifest has no valid issueId")
+            if issue_id != run_issue_id:
+                raise LaneError(
+                    "IssueIdMismatch",
+                    f"run {manifest['runId']} is bound to {run_issue_id}, not {issue_id}",
+                )
+            require_issue_ledger(
+                Path(manifest["repoRoot"]), [issue_id], reject_suspended=True
+            )
+            issue_attempts = status.get("issueAttempts", {})
+            if not isinstance(issue_attempts, dict) or not all(
+                isinstance(key, str)
+                and ISSUE_ID_RE.fullmatch(key)
+                and type(value) is int
+                and value >= 0
+                for key, value in issue_attempts.items()
+            ):
+                raise LaneError(
+                    "StateCorrupt", "issueAttempts must be a map of issue IDs to counts"
+                )
+            current_attempts = issue_attempts.get(issue_id, 0)
+            if current_attempts >= MAX_PI_CORRECTIONS_PER_ISSUE:
+                raise LaneError(
+                    "PiIssueRetryLimit",
+                    f"issue {issue_id} already used {MAX_PI_CORRECTIONS_PER_ISSUE} Pi correction attempts; do not send it to Pi again",
+                )
+            attempt = current_attempts + 1
             revision = int(status.get("revision", 0)) + 1
             correction_path = path / f"task-packet-revision-{revision}.md"
             lines = [
@@ -625,6 +806,10 @@ def handle_drive(arguments: dict[str, Any]) -> dict[str, Any]:
                 "Preserve the settled architecture, ownership, Git boundary, and original task packet.",
                 "",
                 "CORRECTION",
+                f"Core issue ID: {issue_id}",
+                f"Pi correction attempt: {attempt} of {MAX_PI_CORRECTIONS_PER_ISSUE}",
+                "Fix the stated root cause rather than suppressing its symptom.",
+                "",
                 instruction.strip(),
                 "",
                 "PRIMARY EVIDENCE",
@@ -638,7 +823,20 @@ def handle_drive(arguments: dict[str, Any]) -> dict[str, Any]:
                 ]
             )
             correction_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            return spawn_turn(path, revision, correction_path)
+            updated_attempts = {**issue_attempts, issue_id: attempt}
+            return spawn_turn(
+                path,
+                revision,
+                correction_path,
+                status_changes={
+                    "issueAttempts": updated_attempts,
+                    "activeIssue": {
+                        "issueId": issue_id,
+                        "attempt": attempt,
+                        "limit": MAX_PI_CORRECTIONS_PER_ISSUE,
+                    },
+                },
+            )
 
     raise LaneError("InvalidDirective", "directive must be wait, pause, correct, or abort")
 

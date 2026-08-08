@@ -153,7 +153,7 @@ def main() -> int:
     command.extend(
         [
             f"@{message_file}",
-            "Implement this Sol Pi Advisor task packet. Use $SOL_PI_SCRATCH_DIR for disposable experiments, never create scratch files in the repository, and do not install or resolve dependencies. Repository-wide host checks belong to primary Sol. Your final action must call submit_handoff exactly once.",
+            f"Implement the Sol Pi Advisor task packet bound to issue {manifest['issueId']}. Use $SOL_PI_SCRATCH_DIR for disposable experiments, never create scratch files in the repository, and do not install or resolve dependencies. Repository-wide host checks and the issues.md ledger belong to the primary task. Your final action must call submit_handoff exactly once.",
         ]
     )
 
@@ -164,6 +164,7 @@ def main() -> int:
             "PI_SKIP_VERSION_CHECK": "1",
             "SOL_PI_ALLOWED_PATHS_JSON": json.dumps(manifest["allowedPaths"]),
             "SOL_PI_BASE_COMMIT": manifest["baseCommit"],
+            "SOL_PI_ISSUE_ID": manifest["issueId"],
             "SOL_PI_RUN_ID": manifest["runId"],
             "SOL_PI_SCRATCH_DIR": str(scratch_dir),
             "TMPDIR": str(scratch_dir),

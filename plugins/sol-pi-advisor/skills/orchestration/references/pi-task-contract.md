@@ -1,7 +1,7 @@
 # Pi implementation task contract
 
 Use this contract only after current-turn authorization for the Sol Pi Advisor
-workflow. The primary Sol task owns design, verification, corrections, Git/PR
+workflow. The primary task owns design, verification, corrections, Git/PR
 actions, review, and acceptance. Pi owns only implementation inside the supplied
 packet and worktree.
 
@@ -9,19 +9,24 @@ packet and worktree.
 
 1. Confirm prerequisites with `pi_lane_preflight`.
 2. Resolve the canonical repository root and an exact intended base ref.
-3. Build the dependency DAG and every complete task packet below before starting Pi.
-4. For one serial slice, call `pi_lane_start`. For one wave of 2-4 independent
-   slices with pairwise-disjoint ownership, call `pi_lane_batch_start`. Use
-   `execution_mode: supervised-local`.
-5. Record the batch identity when present and every returned run, session,
-   worktree, base commit, revision, and process.
+3. Derive the goal, core problem, causal model, task split, and acceptance
+   invariants from first principles. Create or update repository-root `issues.md`,
+   assign a stable ID to every fine-grained task, record its DAG dependencies, and
+   mark eligible entries `READY` before starting Pi.
+4. For one serial issue, call `pi_lane_start` with its ledger `issueId`. For one
+   wave of 2-4 independent issues with pairwise-disjoint ownership, call
+   `pi_lane_batch_start` with one unique `issueId` per lane. Use
+   `execution_mode: supervised-local`. Dispatch one issue at a time by default.
+5. Record the batch identity when present and every returned issue ID, run, session,
+   worktree, base commit, revision, and process in the matching ledger entry.
 6. Wait using bounded `pi_lane_drive` calls for a serial lane or
    `pi_lane_batch_drive` for a parallel wave until all relevant lanes settle.
    Use `pause` for a recoverable safety review and `abort` only for permanent
    abandonment.
 7. Inspect host-observed evidence and the actual worktree. Rerun checks independently.
-8. Send corrections to the same run with `pi_lane_drive`; wait, inspect, and verify
-   again.
+8. Send each failed acceptance issue to the same run with `pi_lane_drive`,
+   `directive: correct`, and a stable root-cause `issueId`; wait, inspect, and verify
+   again. The same issue gets at most two Pi corrections.
 9. Keep all commit, push, and PR operations outside Pi and after acceptance.
 
 The primary must prove that siblings in one parallel wave have the same immutable
@@ -30,12 +35,20 @@ pairwise-disjoint `allowedPaths`, and independent acceptance tests. Parent/child
 paths overlap. Shared files, lockfiles, generated artifacts, migrations, and
 dependent state-machine changes stay serial. Corrections always use
 `pi_lane_drive` on the exact affected run; batches do not have shared corrections.
+Every run is permanently bound to the `issues.md` ID supplied at start. A correction
+with another ID is invalid. A newly discovered root cause gets a new ledger entry
+and a separate scheduled run rather than being folded into the current session.
+Only `READY` entries may start. A `SUSPENDED` entry is a user-selected,
+`NON-BLOCKING` deferral and must not be dispatched or corrected until the user
+explicitly resumes it by returning it to `READY`.
 
 Before step 3, reject or split a lane whose architecture is unsettled, whose
-expected scope exceeds 12 changed files without written justification, or which
-combines three or more independent high-risk domains. A speed-tier/default Pi model
-is not sufficient evidence of fitness for cross-module security, atomicity, or
-concurrency work. Ask the user to authorize a stronger model or reduce the slice.
+expected scope exceeds 5 changed files without written justification, or which
+combines more than one independent risk domain. A Pi task normally owns one
+observable behavior or root-cause defect and one focused acceptance test. Judge
+lane fit only from workflow shape, scope, ownership, dependencies, and risk. The
+primary and Pi model, provider, reasoning level, and Pi version are never
+lane-eligibility criteria.
 
 ## Required task packet
 
@@ -47,20 +60,32 @@ Act as the implementation worker in the Sol Pi Advisor workflow. Implement only 
 settled specification and owned files. Do not redesign architecture, broaden scope,
 revert unrelated edits, perform Git history or remote operations, or delegate work.
 
+ISSUE IDENTITY
+- Issue ID: <Exact stable issues.md ID bound to this run.>
+- Ledger status at dispatch: READY.
+- Dependencies accepted: <Issue IDs and acceptance evidence, or none.>
+
 OBJECTIVE
 <Observable outcome, why it matters, and exact acceptance conditions.>
+
+FIRST-PRINCIPLES BASIS
+- Core problem: <Smallest problem preventing the observable outcome.>
+- Causal model: <Evidence-backed explanation linking cause to failure.>
+- Core invariant: <Behavior and failure boundary that must hold.>
+- Falsifying evidence: <Focused observation/test that would disprove the fix.>
+- Excluded symptoms: <Visible effects that must not be mistaken for root causes.>
 
 LANE FIT AND BUDGET
 - Slice: <One coherent vertical outcome; list later planned slices separately.>
 - DAG position: <Serial dependency, or parallel wave/lane ID plus later dependencies.>
 - Parallel siblings: <Lane IDs and their non-overlapping ownership, or none.>
-- Frozen shared contracts: <Interfaces/schemas fixed by Sol before parallel start, or n/a.>
-- Risk domains: <Exact domains; normally no more than two independent high-risk domains.>
+- Frozen shared contracts: <Interfaces/schemas fixed by the primary before parallel start, or n/a.>
+- Risk domain: <The one primary risk domain owned by this fine-grained task.>
 - Expected diff: <Expected files/path prefixes and approximate size.>
-- Settled Sol decisions: <Architecture, interfaces, trust/transaction ordering, and exclusions.>
+- Settled primary decisions: <Architecture, interfaces, trust/transaction ordering, and exclusions.>
 - Failure invariants: <Negative paths that must fail closed or preserve prior state.>
-- Pi model fit: <Observed/configured model facts and why this slice fits it.>
-- Budget: initial implementation + at most two corrections; 45-minute checkpoint per turn.
+- Budget: initial implementation; at most two corrections per stable core issue;
+  45-minute checkpoint per turn.
 
 FILES AND OWNERSHIP
 You own only:
@@ -81,10 +106,11 @@ CONSTRAINTS
 STARTING STATE
 - Repository: <canonical root>
 - Base ref and commit: <exact values>
+- Bound issue ID: <exact issues.md ID; immutable for this run/session>
 - Environment: detached worktree managed by Sol Pi Advisor
 - Run and session identity: <none for initial run; exact existing values for correction>
 - Accepted dependency state: <exact commit or none>
-- Batch/lane identity: <none for serial; batchId is assigned by the host and laneId is supplied by Sol>
+- Batch/lane identity: <none for serial; batchId is assigned by the host and laneId is supplied by the primary>
 
 VERIFICATION
 - Baseline: <Focused test/lint/type-check commands and known failures before implementation.>
@@ -92,7 +118,7 @@ VERIFICATION
   Success: <expected exit status and concrete evidence>
 - Primary run after handoff: <repository-wide, dependency-resolving, dead-code, or integration command>
   Success: <expected exit status and concrete evidence>
-- First-candidate gate: <scope estimate comparison, package lint/type-check, standards/spec review.>
+- First-candidate gate: <first-principles core-invariant test, scope estimate comparison, package lint/type-check, and standards/spec review.>
 - Inspect: <diff, artifact, or runtime behavior>
   Success: <required evidence>
 
@@ -135,7 +161,22 @@ that evidence is being inspected.
 
 Do not accept a task packet that bundles independent product slices merely because
 their files share a feature name. Do not use corrections as incremental discovery
-of architecture. After two correction turns, stop when the same semantic defect
-class remains, the diff has materially outgrown its estimate, or a new risk domain
-appears. Replan/split or obtain explicit user authorization for a stronger model.
-At 45 minutes, surface a checkpoint instead of silently polling further.
+of architecture. On an acceptance failure, identify the first-principles root cause
+and use the stable lowercase `issueId` already bound at run start. Return that exact
+issue to the same Pi run/session. Reuse the ID when symptoms change but the cause
+does not; never rename or start another run to reset its counter. The MCP host
+rejects a mismatched ID and a third correction for one issue. A truly different
+root cause must first become a new `issues.md` entry and separate scheduled task.
+
+After two failed Pi corrections for the same issue, stop using Pi for it. If the
+remaining change is a settled micro-fix, the primary may run at most two
+`fix -> focused test` rounds. Otherwise, or if both primary rounds fail, record the
+existing repository-root `issues.md` entry under the issue ledger contract. Mark
+dependency-blocking issues `P0`; document proven-independent issues as
+`NON-BLOCKING` and continue only independent DAG work. At 45 minutes, surface a
+checkpoint instead of silently polling further.
+
+When the user explicitly defers a proven `NON-BLOCKING` issue, record it as
+`SUSPENDED` with the decision evidence and resume condition. Remove it from READY
+selection, Pi correction, and active acceptance. Do not infer suspension from age,
+difficulty, retry exhaustion, or green unrelated tests.

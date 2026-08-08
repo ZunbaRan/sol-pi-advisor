@@ -113,7 +113,7 @@ export default function workerContract(pi: ExtensionAPI) {
 				/\bgit\s+(?:-[^\s]+\s+)*(?:add|commit|push|fetch|pull|merge|rebase|cherry-pick|reset|clean|checkout|switch|branch|tag|stash|worktree)\b/i;
 			const prOperation = /\b(?:gh|glab)\s+pr\b/i;
 			if (forbidden.test(command) || prOperation.test(command)) {
-				return { block: true, reason: "Git history, remote, worktree, and PR operations are owned by primary Sol." };
+				return { block: true, reason: "Git history, remote, worktree, and PR operations are owned by the primary task." };
 			}
 			const primaryOwnedReason = primaryOwnedCommandReason(command);
 			if (primaryOwnedReason) return { block: true, reason: primaryOwnedReason };

@@ -1,7 +1,7 @@
 interface:
   display_name: "Sol Pi Advisor"
-  short_description: "Sol plans, Pi implements, and fresh Sol reviews"
-  default_prompt: "Use $orchestration to deliver this change through a local Pi implementation lane and fresh Sol review."
+  short_description: "First-principles primary, bounded Pi, fresh Sol review"
+  default_prompt: "Use $orchestration to split this goal from first principles into an issues.md ledger with stable IDs, deliver READY fine-grained items through their bound local Pi sessions, exclude user-suspended non-blocking items until explicitly resumed, and obtain fresh Sol review."
 
 policy:
   allow_implicit_invocation: false

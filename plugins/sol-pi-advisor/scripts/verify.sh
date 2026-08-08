@@ -14,6 +14,7 @@ mcp_manifest=$plugin_dir/.mcp.json
 skill=$plugin_dir/skills/orchestration/SKILL.md
 cleanup_skill=$plugin_dir/skills/cleanup/SKILL.md
 cleanup_script=$plugin_dir/skills/cleanup/scripts/cleanup-runs.py
+issues_contract=$plugin_dir/skills/orchestration/references/issues-contract.md
 reviewer=$plugin_dir/agents/sol-pi-advisor-sol-reviewer.toml
 installer=$plugin_dir/scripts/install-agent.sh
 
@@ -45,8 +46,17 @@ grep -q 'directive: pause' "$skill" || fail 'recoverable pause contract is missi
 grep -q 'policyBasis: git-worktree-state' "$skill" || fail 'Git-evidence policy contract is missing.'
 grep -q 'sol_pi_advisor_sol_reviewer' "$skill" || fail 'reviewer role is missing.'
 grep -q 'supervised-local' "$skill" || fail 'execution boundary is missing.'
-grep -q '`high`, `xhigh`, or' "$skill" || fail 'eligible primary reasoning levels are missing.'
-grep -q 'do not reject `xhigh` or `max`' "$skill" || fail 'higher primary reasoning levels are not explicitly accepted.'
+grep -q 'Any available primary model and reasoning level is' "$skill" ||
+  fail 'model-independent primary eligibility is missing.'
+grep -q 'lane-eligibility criteria' "$plugin_dir/skills/orchestration/references/pi-task-contract.md" ||
+  fail 'model-independent Pi lane eligibility is missing.'
+grep -qi 'first principles' "$skill" || fail 'first-principles planning contract is missing.'
+grep -q 'issues.md' "$skill" || fail 'exhausted-issue recording contract is missing.'
+grep -q 'before calling' "$issues_contract" || fail 'pre-dispatch issue ledger gate is missing.'
+grep -q '## issue-001:' "$issues_contract" ||
+  fail 'issues.md entry template is missing.'
+grep -q 'SUSPENDED' "$issues_contract" ||
+  fail 'suspended issue lifecycle contract is missing.'
 
 grep -q '^name: cleanup$' "$cleanup_skill" || fail 'cleanup skill name is invalid.'
 grep -q 'dry-run by default' "$cleanup_skill" || fail 'cleanup dry-run contract is missing.'
@@ -73,10 +83,34 @@ if grep -R -n 'SUPPORTED_PI_VERSION\|supportedPiVersion\|versionCompatible\|PiVe
   fail 'a Pi version gate is wired into Sol Pi Advisor.'
 fi
 
+if grep -R -n -E \
+  'GPT-5\.6 Sol primary|gpt-5\.6-sol.*primary|high-or-higher|eligible Sol task|Pi model fit|speed-tier/default Pi model|speed-tier model|stronger Pi model|authorize a stronger model' \
+  "$plugin_dir/skills/orchestration" "$plugin_dir/README.md" >/dev/null; then
+  fail 'a primary or Pi model gate is wired into Sol Pi Advisor.'
+fi
+
 grep -q 'SOL_PI_SCRATCH_DIR' "$plugin_dir/mcp/run_worker.py" ||
   fail 'run-owned scratch directory is not wired into the worker.'
+grep -q '^MAX_PI_CORRECTIONS_PER_ISSUE = 2$' "$plugin_dir/mcp/server.py" ||
+  fail 'two-correction issue limit is missing.'
+grep -q 'PiIssueRetryLimit' "$plugin_dir/mcp/server.py" ||
+  fail 'Pi correction limit error is missing.'
+grep -q 'IssueIdMismatch' "$plugin_dir/mcp/server.py" ||
+  fail 'run-bound issue ID enforcement is missing.'
+grep -q 'IssueLedgerEntryMissing' "$plugin_dir/mcp/server.py" ||
+  fail 'pre-dispatch issue ledger enforcement is missing.'
+grep -q 'IssueSuspended' "$plugin_dir/mcp/server.py" ||
+  fail 'suspended issue dispatch guard is missing.'
+grep -q '^DISPATCHABLE_ISSUE_STATUS = "READY"$' "$plugin_dir/mcp/server.py" ||
+  fail 'READY-only Pi dispatch guard is missing.'
+grep -q '"issueId": options\["issueId"\]' "$plugin_dir/mcp/server.py" ||
+  fail 'run manifest issue binding is missing.'
 grep -q 'collect_git_policy_snapshot' "$plugin_dir/mcp/run_worker.py" ||
   fail 'live Git policy monitoring is not wired into the worker.'
+grep -q 'SOL_PI_ISSUE_ID' "$plugin_dir/mcp/run_worker.py" ||
+  fail 'worker issue binding is missing.'
+grep -q 'repository-root issues.md is owned by the primary task' "$plugin_dir/mcp/common.py" ||
+  fail 'primary-owned issue ledger boundary is missing.'
 grep -q 'Dependency-resolving commands are primary-owned' \
   "$plugin_dir/pi-extensions/worker-contract.ts" ||
   fail 'dependency-resolution command guard is missing.'

@@ -195,6 +195,10 @@ def normalize_allowed_paths(values: Any) -> list[str]:
             raise LaneError("InvalidOwnership", f"invalid repository-relative path: {raw}")
         if path.parts[0] == ".git" or any(char in candidate for char in "*?[]{}"):
             raise LaneError("InvalidOwnership", f"protected or glob path is not allowed: {raw}")
+        if candidate == "issues.md":
+            raise LaneError(
+                "InvalidOwnership", "repository-root issues.md is owned by the primary task"
+            )
         normalized.append(path.as_posix())
     return sorted(set(normalized))
 

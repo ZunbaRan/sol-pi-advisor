@@ -37,7 +37,21 @@ with tempfile.TemporaryDirectory(prefix="sol-pi-advisor-e2e-") as raw_root:
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / "src").mkdir()
     (repo / "src" / "seed.txt").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "src/seed.txt"], check=True)
+    (repo / "issues.md").write_text(
+        "# Issues\n\n"
+        + "\n\n".join(
+            f"## issue-{index:03d}: fake work item {index}\n\n- Status: READY"
+            for index in range(1, 11)
+        )
+        + "\n\n## issue-011: intentionally suspended work item\n\n"
+        + "- Status: SUSPENDED\n"
+        + "- Classification: NON-BLOCKING\n"
+        + "- Suspension decision: explicit test-user decision\n"
+        + "- Resume condition: explicit test-user request\n"
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "src/seed.txt", "issues.md"], check=True)
     subprocess.run(
         [
             "git",
@@ -139,6 +153,93 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
     process.stdin.flush()
 
+    missing_start_issue_id = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 18,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "taskPacket": "A start without a ledger issue ID must be rejected.\n",
+                    "allowedPaths": ["src"],
+                    "executionMode": "supervised-local",
+                },
+            },
+        },
+    )
+    assert missing_start_issue_id["isError"] is True, missing_start_issue_id
+    assert missing_start_issue_id["structuredContent"]["code"] == "InvalidIssueId"
+
+    unlisted_start_issue_id = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "issueId": "issue-999",
+                    "taskPacket": "An unlisted issue must be rejected.\n",
+                    "allowedPaths": ["src"],
+                    "executionMode": "supervised-local",
+                },
+            },
+        },
+    )
+    assert unlisted_start_issue_id["isError"] is True, unlisted_start_issue_id
+    assert unlisted_start_issue_id["structuredContent"]["code"] == "IssueLedgerEntryMissing"
+
+    suspended_start = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 221,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "issueId": "issue-011",
+                    "taskPacket": "A suspended issue must stay outside Pi scheduling.\n",
+                    "allowedPaths": ["src"],
+                    "executionMode": "supervised-local",
+                },
+            },
+        },
+    )
+    assert suspended_start["isError"] is True, suspended_start
+    assert suspended_start["structuredContent"]["code"] == "IssueSuspended"
+
+    pi_owned_ledger = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "issueId": "issue-001",
+                    "taskPacket": "Pi must not own the primary issue ledger.\n",
+                    "allowedPaths": ["issues.md"],
+                    "executionMode": "supervised-local",
+                },
+            },
+        },
+    )
+    assert pi_owned_ledger["isError"] is True, pi_owned_ledger
+    assert pi_owned_ledger["structuredContent"]["code"] == "InvalidOwnership"
+
     started_result = exchange(
         process,
         {
@@ -150,6 +251,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "repoRoot": str(repo),
                     "baseRef": "HEAD",
+                    "issueId": "issue-001",
                     "taskPacket": "ROLE\\nImplement the fake task.\\nLOG_SAVED_LOCKFILE\\n",
                     "allowedPaths": ["src"],
                     "executionMode": "supervised-local",
@@ -160,7 +262,11 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     assert started_result["isError"] is False, started_result
     started = started_result["structuredContent"]
     run_id = started["runId"]
+    assert started["issueId"] == "issue-001"
+    assert Path(started["issueLedgerPath"]) == (repo / "issues.md").resolve()
+    assert started["issueAttempts"] == {"issue-001": 0}
     assert started["pi"]["version"] == "999.0.0-test"
+    assert started["limits"] == {"piCorrectionsPerIssue": 2}
 
     deadline = time.monotonic() + 10
     snapshot = started
@@ -192,6 +298,78 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     assert Path(snapshot["evidence"]["diffArtifact"]).is_file()
     assert Path(snapshot["scratchDir"]).is_dir()
 
+    missing_issue_id = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": run_id,
+                    "directive": "correct",
+                    "instruction": "A correction without a core issue ID must be rejected.",
+                    "evidence": ["Acceptance failed."],
+                },
+            },
+        },
+    )
+    assert missing_issue_id["isError"] is True, missing_issue_id
+    assert missing_issue_id["structuredContent"]["code"] == "InvalidIssueId"
+
+    mismatched_issue_id = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 19,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": run_id,
+                    "directive": "correct",
+                    "issueId": "issue-999",
+                    "instruction": "A correction for another ledger item must be rejected.",
+                    "evidence": ["This run is bound to issue-001."],
+                },
+            },
+        },
+    )
+    assert mismatched_issue_id["isError"] is True, mismatched_issue_id
+    assert mismatched_issue_id["structuredContent"]["code"] == "IssueIdMismatch"
+
+    ledger_path = repo / "issues.md"
+    ready_ledger = ledger_path.read_text(encoding="utf-8")
+    suspended_ledger = ready_ledger.replace(
+        "## issue-001: fake work item 1\n\n- Status: READY",
+        "## issue-001: fake work item 1\n\n- Status: SUSPENDED",
+        1,
+    )
+    assert suspended_ledger != ready_ledger
+    ledger_path.write_text(suspended_ledger, encoding="utf-8")
+    suspended_correction = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 191,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": run_id,
+                    "directive": "correct",
+                    "issueId": "issue-001",
+                    "instruction": "A suspended issue must not receive another correction.",
+                    "evidence": ["The user deferred this non-blocking issue."],
+                },
+            },
+        },
+    )
+    assert suspended_correction["isError"] is True, suspended_correction
+    assert suspended_correction["structuredContent"]["code"] == "IssueSuspended"
+    ledger_path.write_text(ready_ledger, encoding="utf-8")
+
     corrected_result = exchange(
         process,
         {
@@ -203,6 +381,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "runId": run_id,
                     "directive": "correct",
+                    "issueId": "issue-001",
                     "instruction": "Apply the fake correction.",
                     "evidence": ["The primary requested corrected output."],
                 },
@@ -212,6 +391,12 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     assert corrected_result["isError"] is False, corrected_result
     snapshot = corrected_result["structuredContent"]
     assert snapshot["revision"] == 1
+    assert snapshot["issueAttempts"] == {"issue-001": 1}
+    assert snapshot["activeIssue"] == {
+        "issueId": "issue-001",
+        "attempt": 1,
+        "limit": 2,
+    }
 
     deadline = time.monotonic() + 10
     while snapshot["state"] not in {"ready", "needs-attention", "failed", "aborted"}:
@@ -236,6 +421,67 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     assert (Path(snapshot["worktree"]) / "src" / "implemented.txt").read_text() == "corrected\n"
     assert snapshot["piSessionId"] == run_id
 
+    second_same_issue = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": run_id,
+                    "directive": "correct",
+                    "issueId": "issue-001",
+                    "instruction": "Retry the same acceptance-output root cause once more.",
+                    "evidence": ["The same root cause remains after the first correction."],
+                },
+            },
+        },
+    )
+    assert second_same_issue["isError"] is False, second_same_issue
+    snapshot = second_same_issue["structuredContent"]
+    deadline = time.monotonic() + 10
+    while snapshot["state"] not in {"ready", "needs-attention", "failed", "aborted"}:
+        assert time.monotonic() < deadline, snapshot
+        waited = exchange(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "pi_lane_drive",
+                    "arguments": {"runId": run_id, "directive": "wait", "waitMs": 1000},
+                },
+            },
+        )
+        assert waited["isError"] is False, waited
+        snapshot = waited["structuredContent"]
+    assert snapshot["revision"] == 2
+    assert snapshot["issueAttempts"] == {"issue-001": 2}
+
+    exhausted_same_issue = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 16,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_drive",
+                "arguments": {
+                    "runId": run_id,
+                    "directive": "correct",
+                    "issueId": "issue-001",
+                    "instruction": "This third correction must be rejected.",
+                    "evidence": ["The same root cause still remains."],
+                },
+            },
+        },
+    )
+    assert exhausted_same_issue["isError"] is True, exhausted_same_issue
+    assert exhausted_same_issue["structuredContent"]["code"] == "PiIssueRetryLimit"
+
     live_violation_result = exchange(
         process,
         {
@@ -247,6 +493,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "repoRoot": str(repo),
                     "baseRef": "HEAD",
+                    "issueId": "issue-002",
                     "taskPacket": "TARGET: src/live.txt\nVIOLATE: outside/scratch.txt\n",
                     "allowedPaths": ["src"],
                     "executionMode": "supervised-local",
@@ -294,6 +541,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "runId": live_run_id,
                     "directive": "correct",
+                    "issueId": "issue-002",
                     "instruction": "TARGET: src/live.txt\nREMOVE: outside/scratch.txt\nRemove the unauthorized scratch file.",
                     "evidence": ["Git evidence found outside/scratch.txt outside ownership."],
                 },
@@ -338,6 +586,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "repoRoot": str(repo),
                     "baseRef": "HEAD",
+                    "issueId": "issue-003",
                     "taskPacket": "TARGET: pause/value.txt\nPAUSE_WAIT\n",
                     "allowedPaths": ["pause"],
                     "executionMode": "supervised-local",
@@ -378,6 +627,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "runId": pause_snapshot["runId"],
                     "directive": "correct",
+                    "issueId": "issue-003",
                     "instruction": "TARGET: pause/value.txt\nComplete after the recoverable pause.",
                     "evidence": ["Primary inspection permits the same session to continue."],
                 },
@@ -414,6 +664,39 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     worktrees_root = root / "codex" / "sol-pi-advisor" / "worktrees"
     runs_before_overlap = {item.name for item in runs_root.iterdir()}
     worktrees_before_overlap = {item.name for item in worktrees_root.iterdir()}
+    duplicate_issue_result = exchange(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "pi_lane_batch_start",
+                "arguments": {
+                    "repoRoot": str(repo),
+                    "baseRef": "HEAD",
+                    "executionMode": "supervised-local",
+                    "lanes": [
+                        {
+                            "laneId": "duplicate-a",
+                            "issueId": "issue-004",
+                            "taskPacket": "TARGET: duplicate-a/value.txt\n",
+                            "allowedPaths": ["duplicate-a"],
+                        },
+                        {
+                            "laneId": "duplicate-b",
+                            "issueId": "issue-004",
+                            "taskPacket": "TARGET: duplicate-b/value.txt\n",
+                            "allowedPaths": ["duplicate-b"],
+                        },
+                    ],
+                },
+            },
+        },
+    )
+    assert duplicate_issue_result["isError"] is True, duplicate_issue_result
+    assert duplicate_issue_result["structuredContent"]["code"] == "InvalidParallelWave"
+
     overlap_result = exchange(
         process,
         {
@@ -429,11 +712,13 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                     "lanes": [
                         {
                             "laneId": "overlap-a",
+                            "issueId": "issue-004",
                             "taskPacket": "TARGET: shared/a.txt\\n",
                             "allowedPaths": ["shared"],
                         },
                         {
                             "laneId": "overlap-b",
+                            "issueId": "issue-005",
                             "taskPacket": "TARGET: shared/nested/b.txt\\n",
                             "allowedPaths": ["shared/nested"],
                         },
@@ -462,11 +747,13 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                     "lanes": [
                         {
                             "laneId": "server-core",
+                            "issueId": "issue-006",
                             "taskPacket": "TARGET: server/core.txt\\n",
                             "allowedPaths": ["server"],
                         },
                         {
                             "laneId": "ui-shell",
+                            "issueId": "issue-007",
                             "taskPacket": "TARGET: ui/shell.txt\\n",
                             "allowedPaths": ["ui"],
                         },
@@ -482,6 +769,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
     assert all(lane["state"] in {"preparing", "running"} for lane in batch["lanes"])
     assert len({lane["pid"] for lane in batch["lanes"]}) == 2
     assert {lane["laneId"] for lane in batch["lanes"]} == {"server-core", "ui-shell"}
+    assert {lane["issueId"] for lane in batch["lanes"]} == {"issue-006", "issue-007"}
     assert all(lane["batchId"] == batch["batchId"] for lane in batch["lanes"])
     assert len({lane["runId"] for lane in batch["lanes"]}) == 2
     assert len({lane["worktree"] for lane in batch["lanes"]}) == 2
@@ -499,6 +787,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "repoRoot": str(repo),
                     "baseRef": "HEAD",
+                    "issueId": "issue-008",
                     "taskPacket": "This must not start during a parallel wave.\\n",
                     "allowedPaths": ["other"],
                     "executionMode": "supervised-local",
@@ -548,6 +837,7 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                 "arguments": {
                     "runId": by_lane["server-core"]["runId"],
                     "directive": "correct",
+                    "issueId": "issue-006",
                     "instruction": "TARGET: server/core.txt\\nApply the lane-specific correction.",
                     "evidence": ["Only server-core needs correction."],
                 },
@@ -598,11 +888,13 @@ print(json.dumps({"type": "agent_end", "messages": [], "willRetry": False}), flu
                     "lanes": [
                         {
                             "laneId": "abort-a",
+                            "issueId": "issue-009",
                             "taskPacket": "TARGET: abort-a/value.txt\\n",
                             "allowedPaths": ["abort-a"],
                         },
                         {
                             "laneId": "abort-b",
+                            "issueId": "issue-010",
                             "taskPacket": "TARGET: abort-b/value.txt\\n",
                             "allowedPaths": ["abort-b"],
                         },
